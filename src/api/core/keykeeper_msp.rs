@@ -255,6 +255,13 @@ fn business_policies() -> Vec<(OrgPolicyType, Value)> {
         // Account recovery, with automatic enrollment: a member who forgets
         // their master password can be let back in by an owner or admin.
         (OrgPolicyType::ResetPassword, json!({ "autoEnrollEnabled": true })),
+        // Single organization: members can't also belong to another
+        // organization with the same account. Recovery opens a member's whole
+        // account, so without this a client's admins could recover their way
+        // into a member's family organization. Personal items go in a separate
+        // personal account. Upstream exempts owners and admins, so MSP staff
+        // still reach every client.
+        (OrgPolicyType::SingleOrg, Value::Null),
         // A strong master password: at least 12 characters and a strength
         // score of 3 out of 4. Existing passwords aren't forced to change.
         (
