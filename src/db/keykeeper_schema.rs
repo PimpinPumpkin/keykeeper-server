@@ -24,6 +24,17 @@ table! {
         msp_uuid -> Text,
         created_at -> Timestamp,
         preset -> Nullable<Text>,
+        enrollment_token -> Nullable<Text>,
+        enrollment_token_created_at -> Nullable<Timestamp>,
+        everyone_collection -> Nullable<Text>,
+    }
+}
+
+table! {
+    msp_enrollment_joins (membership_uuid) {
+        membership_uuid -> Text,
+        org_uuid -> Text,
+        joined_at -> Timestamp,
     }
 }
 

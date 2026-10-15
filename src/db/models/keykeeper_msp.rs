@@ -13,13 +13,13 @@ use crate::{
     api::EmptyResult,
     db::{
         DbConn,
-        keykeeper_schema::{msp_clients, msp_memberships, msp_staff, msps},
+        keykeeper_schema::{msp_clients, msp_enrollment_joins, msp_memberships, msp_staff, msps},
     },
     error::MapResult,
 };
 use macros::UuidFromParam;
 
-use super::{MembershipId, MembershipType, OrganizationId, UserId};
+use super::{CollectionId, MembershipId, MembershipType, OrganizationId, UserId};
 
 // Our migrations exist for SQLite and PostgreSQL only.
 #[cfg(feature = "mysql")]
@@ -115,6 +115,22 @@ pub struct MspClient {
     pub created_at: NaiveDateTime,
     /// The defaults the client started with, such as "business".
     pub preset: Option<String>,
+    /// Lets an account ask to join this client as a regular member, through
+    /// the RMM install command. Never grants the org key.
+    pub enrollment_token: Option<String>,
+    pub enrollment_token_created_at: Option<NaiveDateTime>,
+    /// The collection people who join get, such as "Everyone".
+    pub everyone_collection: Option<CollectionId>,
+}
+
+/// Someone who joined a client through its enrollment token, and when.
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_enrollment_joins)]
+#[diesel(primary_key(membership_uuid))]
+pub struct MspEnrollmentJoin {
+    pub membership_uuid: MembershipId,
+    pub org_uuid: OrganizationId,
+    pub joined_at: NaiveDateTime,
 }
 
 #[derive(Identifiable, Queryable, Insertable)]
@@ -232,13 +248,55 @@ impl MspStaff {
 }
 
 impl MspClient {
-    pub fn new(org_uuid: OrganizationId, msp_uuid: MspId, preset: Option<String>) -> Self {
+    pub fn new(
+        org_uuid: OrganizationId,
+        msp_uuid: MspId,
+        preset: Option<String>,
+        everyone_collection: Option<CollectionId>,
+    ) -> Self {
         Self {
             org_uuid,
             msp_uuid,
             created_at: Utc::now().naive_utc(),
             preset,
+            enrollment_token: Some(Self::new_enrollment_token()),
+            enrollment_token_created_at: Some(Utc::now().naive_utc()),
+            everyone_collection,
         }
+    }
+
+    /// A new random enrollment token: 256 bits, URL-safe.
+    pub fn new_enrollment_token() -> String {
+        crate::crypto::encode_random_bytes::<32>(&data_encoding::BASE64URL_NOPAD)
+    }
+
+    /// Replaces the enrollment token. Install commands with the old one stop
+    /// letting new people join.
+    pub async fn replace_enrollment_token(&mut self, conn: &DbConn) -> EmptyResult {
+        let token = Self::new_enrollment_token();
+        let now = Utc::now().naive_utc();
+        let org = self.org_uuid.clone();
+        let saved = token.clone();
+        let updated: EmptyResult = conn
+            .run(move |conn| {
+                diesel::update(msp_clients::table.filter(msp_clients::org_uuid.eq(org)))
+                    .set((msp_clients::enrollment_token.eq(saved), msp_clients::enrollment_token_created_at.eq(now)))
+                    .execute(conn)
+                    .map_res("Error replacing the enrollment token")
+            })
+            .await;
+        updated?;
+        self.enrollment_token = Some(token);
+        self.enrollment_token_created_at = Some(now);
+        Ok(())
+    }
+
+    pub async fn find_by_enrollment_token(token: &str, conn: &DbConn) -> Option<Self> {
+        let token = token.to_owned();
+        conn.run(move |conn| {
+            msp_clients::table.filter(msp_clients::enrollment_token.eq(token)).first::<Self>(conn).ok()
+        })
+        .await
     }
 
     pub async fn insert(&self, conn: &DbConn) -> EmptyResult {
@@ -302,6 +360,37 @@ impl MspMembership {
     pub async fn find_by_msp(msp_uuid: &MspId, conn: &DbConn) -> Vec<Self> {
         conn.run(move |conn| {
             msp_memberships::table.filter(msp_memberships::msp_uuid.eq(msp_uuid)).load::<Self>(conn).unwrap_or_default()
+        })
+        .await
+    }
+}
+
+impl MspEnrollmentJoin {
+    pub fn new(membership_uuid: MembershipId, org_uuid: OrganizationId) -> Self {
+        Self {
+            membership_uuid,
+            org_uuid,
+            joined_at: Utc::now().naive_utc(),
+        }
+    }
+
+    pub async fn insert(&self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::insert_into(msp_enrollment_joins::table)
+                .values(self)
+                .execute(conn)
+                .map_res("Error recording an enrollment join")
+        })
+        .await
+    }
+
+    pub async fn count_by_org(org_uuid: &OrganizationId, conn: &DbConn) -> i64 {
+        conn.run(move |conn| {
+            msp_enrollment_joins::table
+                .filter(msp_enrollment_joins::org_uuid.eq(org_uuid))
+                .count()
+                .first::<i64>(conn)
+                .unwrap_or(0)
         })
         .await
     }

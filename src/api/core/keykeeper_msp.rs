@@ -52,14 +52,18 @@ fn clean_name(name: &str) -> Result<String, crate::error::Error> {
 }
 
 /// The caller's role in an MSP. Anyone who isn't staff gets "not found".
-async fn staff_role(msp_id: &MspId, user_id: &UserId, conn: &DbConn) -> Result<MspRole, crate::error::Error> {
+pub(super) async fn staff_role(
+    msp_id: &MspId,
+    user_id: &UserId,
+    conn: &DbConn,
+) -> Result<MspRole, crate::error::Error> {
     let Some(role) = MspStaff::find(msp_id, user_id, conn).await.and_then(|s| s.role()) else {
         err_code!("MSP not found", rocket::http::Status::NotFound.code)
     };
     Ok(role)
 }
 
-async fn require_admin(msp_id: &MspId, user_id: &UserId, conn: &DbConn) -> EmptyResult {
+pub(super) async fn require_admin(msp_id: &MspId, user_id: &UserId, conn: &DbConn) -> EmptyResult {
     match staff_role(msp_id, user_id, conn).await? {
         MspRole::Admin => Ok(()),
         MspRole::Technician => err_code!("Only MSP admins can do this", rocket::http::Status::Forbidden.code),
@@ -336,9 +340,14 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
             OrgPolicy::new(org.uuid.clone(), policy_type, true, policy_data.to_string()).save(&conn).await?;
         }
     }
-    MspClient::new(org.uuid.clone(), msp_id.clone(), business.then(|| BUSINESS_PRESET.to_owned()))
-        .insert(&conn)
-        .await?;
+    MspClient::new(
+        org.uuid.clone(),
+        msp_id.clone(),
+        business.then(|| BUSINESS_PRESET.to_owned()),
+        business.then(|| collection.uuid.clone()),
+    )
+    .insert(&conn)
+    .await?;
     MspMembership::new(owner.uuid.clone(), msp_id.clone()).insert(&conn).await?;
 
     for staff in MspStaff::find_by_msp(&msp_id, &conn).await {
