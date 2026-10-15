@@ -66,6 +66,14 @@ async fn require_admin(msp_id: &MspId, user_id: &UserId, conn: &DbConn) -> Empty
     }
 }
 
+/// Whether a membership came from an MSP. MSP staff are never part of a
+/// client's account recovery: recovery lets the client's admins reset the
+/// staff member's master password and take over their account, which can see
+/// every other client of the MSP.
+pub(super) async fn is_msp_membership(member_id: &MembershipId, conn: &DbConn) -> bool {
+    MspMembership::find_by_membership(member_id, conn).await.is_some()
+}
+
 /// The memberships this MSP created, as a set.
 async fn msp_membership_ids(msp_id: &MspId, conn: &DbConn) -> HashSet<MembershipId> {
     MspMembership::find_by_msp(msp_id, conn).await.into_iter().map(|m| m.membership_uuid).collect()

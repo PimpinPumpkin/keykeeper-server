@@ -2936,6 +2936,11 @@ async fn check_reset_password_applicable_and_permissions(
         err!("Reset target user not found")
     };
 
+    // Keykeeper: an MSP's staff are never reset by a client (see keykeeper_msp).
+    if super::keykeeper_msp::is_msp_membership(member_id, conn).await {
+        err!("MSP staff can't be recovered by a client organization")
+    }
+
     // Resetting user must be higher/equal to user to reset
     match headers.membership_type {
         MembershipType::Owner => Ok(()),
@@ -2986,6 +2991,11 @@ async fn put_reset_password_enrollment(
 
     if reset_password_key.is_none() && OrgPolicy::org_is_reset_password_auto_enroll(&org_id, &conn).await {
         err!("Reset password can't be withdrawn due to an enterprise policy");
+    }
+
+    // Keykeeper: an MSP's staff never join a client's account recovery (see keykeeper_msp).
+    if reset_password_key.is_some() && super::keykeeper_msp::is_msp_membership(&membership.uuid, &conn).await {
+        err!("MSP staff can't join a client organization's account recovery")
     }
 
     if reset_password_key.is_some() {
