@@ -49,6 +49,17 @@ impl Permission {
     pub const ALL: [Permission; 5] =
         [ManageUsers, ManageResetPassword, ManagePolicies, AccessEventLogs, AccessImportExport];
 
+    /// How the MSP audit log names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ManageUsers => "manage users",
+            ManageResetPassword => "account recovery",
+            ManagePolicies => "policies",
+            AccessEventLogs => "event logs",
+            AccessImportExport => "import and export",
+        }
+    }
+
     /// The name upstream's clients use.
     pub fn key(self) -> &'static str {
         match self {
@@ -86,9 +97,10 @@ const ROUTES: &[(Method, &str, &[Permission])] = &[
     (Method::Put, "/organizations/<org_id>/users/<member_id>/restore/vnext", &[ManageUsers]),
     // The Members page loads the collection list for its Collections column.
     (Method::Get, "/organizations/<org_id>/collections", &[ManageUsers, ManageResetPassword]),
-    // The invite and edit dialogs load this one. For a member without access
-    // to all items it lists only the collections they're assigned to.
-    (Method::Get, "/organizations/<org_id>/collections/details", &[ManageUsers]),
+    // The invite and edit dialogs and the import page load this one. For a
+    // member without access to all items it lists only the collections
+    // they're assigned to.
+    (Method::Get, "/organizations/<org_id>/collections/details", &[ManageUsers, AccessImportExport]),
     // Account recovery
     (Method::Get, "/organizations/<org_id>/users/<member_id>/reset-password-details", &[ManageResetPassword]),
     (Method::Put, "/organizations/<org_id>/users/<member_id>/recover-account", &[ManageResetPassword]),
@@ -136,7 +148,7 @@ impl CustomPermissions {
         }
     }
 
-    fn any(&self) -> bool {
+    pub fn any(&self) -> bool {
         Permission::ALL.iter().any(|p| self.has(*p))
     }
 
@@ -298,6 +310,11 @@ pub fn ensure_regular_grant(
 
 /// What clients see for a membership: Custom (4) with the role's permissions,
 /// or whatever upstream decided.
+///
+/// An MSP technician's vault access (access to all items) doesn't show as
+/// managing all collections: they see and edit every item in their own vault,
+/// while the admin console's collection tools need permissions custom roles
+/// don't enforce yet, and its refusals would sign them out.
 pub async fn client_type_and_permissions(
     member: &Membership,
     upstream_type: i32,
@@ -305,7 +322,11 @@ pub async fn client_type_and_permissions(
     conn: &DbConn,
 ) -> (i32, Value) {
     match find(&member.uuid, conn).await {
-        Some(role) => (4, role.to_client_json(member.access_all)),
+        Some(role) => {
+            let manages_collections =
+                member.access_all && super::MspMembership::find_by_membership(&member.uuid, conn).await.is_none();
+            (4, role.to_client_json(manages_collections))
+        }
         None => (upstream_type, upstream_permissions),
     }
 }
@@ -331,12 +352,15 @@ mod tests {
     }
 
     #[test]
-    fn the_members_page_and_member_dialog_can_load_their_collections() {
+    fn the_members_page_member_dialog_and_import_page_can_load_their_collections() {
         assert_eq!(
             route_permissions(Method::Get, "/organizations/<org_id>/collections"),
             route_permissions(Method::Get, "/organizations/<org_id>/users")
         );
-        assert_eq!(route_permissions(Method::Get, "/organizations/<org_id>/collections/details"), &[ManageUsers]);
+        assert_eq!(
+            route_permissions(Method::Get, "/organizations/<org_id>/collections/details"),
+            &[ManageUsers, AccessImportExport]
+        );
         assert!(route_permissions(Method::Post, "/organizations/<org_id>/collections").is_empty());
         assert!(route_permissions(Method::Get, "/organizations/<org_id>/collections/<col_id>/details").is_empty());
     }

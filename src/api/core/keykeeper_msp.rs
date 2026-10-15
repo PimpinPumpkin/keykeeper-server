@@ -7,6 +7,11 @@
 // MSP console does automatically. See DESIGN.md, "MSP console".
 //
 // Callers who aren't staff of an MSP get "not found", so MSPs can't be probed.
+//
+// Technicians can be limited to chosen clients, to a custom role inside them,
+// and away from install commands. One function, sync_staff_memberships, keeps
+// a staff member's client memberships in step with their role and access, so
+// every change applies to all of their clients at once.
 
 use std::collections::HashSet;
 
@@ -21,8 +26,9 @@ use crate::{
         DbConn,
         models::{
             Collection, Membership, MembershipId, MembershipStatus, MembershipType, Msp, MspClient, MspEvent, MspId,
-            MspInvite, MspMembership, MspRole, MspStaff, OrgPolicy, OrgPolicyType, Organization, OrganizationId, User,
-            UserId,
+            MspInvite, MspMembership, MspRole, MspStaff, OrgPolicy, OrgPolicyType, Organization, OrganizationId,
+            TechnicianAccess, User, UserId,
+            keykeeper_roles::{self, CustomPermissions, Permission},
         },
     },
 };
@@ -35,6 +41,7 @@ pub fn routes() -> Vec<Route> {
         create_client,
         add_staff,
         change_staff_role,
+        set_staff_access,
         remove_staff,
         pending_confirmations,
         list_events,
@@ -56,13 +63,25 @@ fn clean_name(name: &str) -> Result<String, crate::error::Error> {
     Ok(name.to_owned())
 }
 
+/// The caller's staff record in an MSP. Anyone who isn't staff gets "not found".
+pub(super) async fn staff_member(
+    msp_id: &MspId,
+    user_id: &UserId,
+    conn: &DbConn,
+) -> Result<MspStaff, crate::error::Error> {
+    match MspStaff::find(msp_id, user_id, conn).await {
+        Some(staff) if staff.role().is_some() => Ok(staff),
+        _ => err_code!("MSP not found", rocket::http::Status::NotFound.code),
+    }
+}
+
 /// The caller's role in an MSP. Anyone who isn't staff gets "not found".
 pub(super) async fn staff_role(
     msp_id: &MspId,
     user_id: &UserId,
     conn: &DbConn,
 ) -> Result<MspRole, crate::error::Error> {
-    let Some(role) = MspStaff::find(msp_id, user_id, conn).await.and_then(|s| s.role()) else {
+    let Some(role) = staff_member(msp_id, user_id, conn).await?.role() else {
         err_code!("MSP not found", rocket::http::Status::NotFound.code)
     };
     Ok(role)
@@ -166,6 +185,35 @@ async fn msp_membership_ids(msp_id: &MspId, conn: &DbConn) -> HashSet<Membership
     MspMembership::find_by_msp(msp_id, conn).await.into_iter().map(|m| m.membership_uuid).collect()
 }
 
+/// What a staff member's membership looks like in each client they reach.
+struct Grant {
+    atype: MembershipType,
+    /// Every vault item in the client.
+    access_all: bool,
+    custom: Option<CustomPermissions>,
+}
+
+impl Grant {
+    /// MSP admins are owners. Technicians are admins, or regular members with
+    /// their custom role and, if it includes them, every vault item.
+    fn for_staff(staff: &MspStaff) -> Option<Self> {
+        let role = staff.role()?;
+        let custom = (role == MspRole::Technician).then(|| staff.custom_role()).flatten();
+        Some(match custom {
+            None => Self {
+                atype: role.membership_type(),
+                access_all: true,
+                custom: None,
+            },
+            Some(custom) => Self {
+                atype: MembershipType::User,
+                access_all: custom.vault_items,
+                custom: Some(custom.permissions),
+            },
+        })
+    }
+}
+
 /// Gives someone the MSP's access to one client: a new membership waiting to
 /// be confirmed, recorded as the MSP's. Leaves any membership they already
 /// have alone, since the client granted it.
@@ -173,7 +221,7 @@ async fn add_msp_membership(
     msp_id: &MspId,
     org_id: &OrganizationId,
     user_id: &UserId,
-    role: MspRole,
+    grant: &Grant,
     invited_by: &str,
     conn: &DbConn,
 ) -> EmptyResult {
@@ -181,11 +229,48 @@ async fn add_msp_membership(
         return Ok(());
     }
     let mut member = Membership::new(user_id.clone(), org_id.clone(), Some(invited_by.to_owned()));
-    member.atype = role.membership_type() as i32;
-    member.access_all = true;
+    member.atype = grant.atype as i32;
+    member.access_all = grant.access_all;
     member.status = MembershipStatus::Accepted as i32;
     member.save(conn).await?;
-    MspMembership::new(member.uuid, msp_id.clone()).insert(conn).await
+    MspMembership::new(member.uuid.clone(), msp_id.clone()).insert(conn).await?;
+    if let Some(custom) = &grant.custom {
+        keykeeper_roles::set(&member.uuid, Some(custom), conn).await?;
+    }
+    Ok(())
+}
+
+/// Brings someone's memberships in the MSP's clients in line with their role
+/// and access, all at once: new memberships (waiting for the org key) in
+/// clients they now reach, the right role and vault access in the rest, and
+/// the MSP's memberships removed from clients they no longer reach.
+/// Memberships a client granted itself are left alone.
+async fn sync_staff_memberships(msp_id: &MspId, staff: &MspStaff, invited_by: &str, conn: &DbConn) -> EmptyResult {
+    let Some(grant) = Grant::for_staff(staff) else {
+        return Ok(());
+    };
+    let reach = staff.reach(conn).await;
+    let ours = msp_membership_ids(msp_id, conn).await;
+    for client in MspClient::find_by_msp(msp_id, conn).await {
+        let reached = reach.as_ref().is_none_or(|r| r.contains(&client.org_uuid));
+        match Membership::find_by_user_and_org(&staff.user_uuid, &client.org_uuid, conn).await {
+            None if reached => {
+                add_msp_membership(msp_id, &client.org_uuid, &staff.user_uuid, &grant, invited_by, conn).await?;
+            }
+            Some(mut member) if ours.contains(&member.uuid) => {
+                if reached {
+                    member.atype = grant.atype as i32;
+                    member.access_all = grant.access_all;
+                    member.save(conn).await?;
+                    keykeeper_roles::set(&member.uuid, grant.custom.as_ref(), conn).await?;
+                } else {
+                    member.delete(conn).await?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Confirmed owners of an organization, other than one membership.
@@ -264,9 +349,15 @@ async fn create_msp(headers: Headers, data: Json<CreateMspData>, conn: DbConn) -
     Ok(Json(json!({ "id": msp.uuid, "name": msp.name, "role": MspRole::Admin.as_str() })))
 }
 
+/// The MSP, its staff, and its clients. A technician limited to chosen
+/// clients sees only those. Only MSP admins see each technician's access;
+/// technicians see their own.
 #[get("/keykeeper/msp/<msp_id>")]
 async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
-    let role = staff_role(&msp_id, &headers.user.uuid, &conn).await?;
+    let caller = staff_member(&msp_id, &headers.user.uuid, &conn).await?;
+    let role = caller.role().unwrap_or(MspRole::Technician);
+    let is_admin = role == MspRole::Admin;
+    let reach = caller.reach(&conn).await;
     let Some(msp) = Msp::find_by_uuid(&msp_id, &conn).await else {
         err_code!("MSP not found", rocket::http::Status::NotFound.code)
     };
@@ -274,11 +365,17 @@ async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
     let mut staff = Vec::new();
     for member in MspStaff::find_by_msp(&msp_id, &conn).await {
         if let (Some(user), Some(member_role)) = (User::find_by_uuid(&member.user_uuid, &conn).await, member.role()) {
+            let access = if is_admin && member_role == MspRole::Technician {
+                json!(member.access(&conn).await)
+            } else {
+                Value::Null
+            };
             staff.push(json!({
                 "userId": user.uuid,
                 "email": user.email,
                 "name": user.name,
                 "role": member_role.as_str(),
+                "access": access,
             }));
         }
     }
@@ -287,6 +384,9 @@ async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
     let ours = msp_membership_ids(&msp_id, &conn).await;
     let mut clients = Vec::new();
     for client in MspClient::find_by_msp(&msp_id, &conn).await {
+        if reach.as_ref().is_some_and(|r| !r.contains(&client.org_uuid)) {
+            continue;
+        }
         let Some(org) = Organization::find_by_uuid(&client.org_uuid, &conn).await else {
             continue;
         };
@@ -294,7 +394,12 @@ async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
         let mut you = Value::Null;
         for member in Membership::find_by_org(&org.uuid, &conn).await {
             if member.user_uuid == headers.user.uuid {
-                you = json!({ "memberId": member.uuid, "status": member.status, "type": member.atype });
+                you = json!({
+                    "memberId": member.uuid,
+                    "status": member.status,
+                    "type": member.atype,
+                    "vaultItems": member.has_full_access(),
+                });
             }
             if ours.contains(&member.uuid) {
                 continue;
@@ -324,15 +429,22 @@ async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
                 "id": i.uuid,
                 "email": i.email,
                 "role": i.role().map(MspRole::as_str),
+                "access": if is_admin { json!(i.access()) } else { Value::Null },
                 "createdAt": crate::util::format_date(&i.created_at),
             })
         })
         .collect();
 
+    let access = if is_admin {
+        Value::Null
+    } else {
+        json!(caller.access(&conn).await)
+    };
     Ok(Json(json!({
         "id": msp.uuid,
         "name": msp.name,
         "role": role.as_str(),
+        "access": access,
         "staff": staff,
         "invites": invites,
         "clients": clients,
@@ -448,12 +560,13 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
     .await?;
     MspMembership::new(owner.uuid.clone(), msp_id.clone()).insert(&conn).await?;
 
+    // New clients reach MSP admins and technicians with every client.
     for staff in MspStaff::find_by_msp(&msp_id, &conn).await {
-        if staff.user_uuid == headers.user.uuid {
+        if staff.user_uuid == headers.user.uuid || staff.reach(&conn).await.is_some() {
             continue;
         }
-        if let Some(role) = staff.role() {
-            add_msp_membership(&msp_id, &org.uuid, &staff.user_uuid, role, &headers.user.email, &conn).await?;
+        if let Some(grant) = Grant::for_staff(&staff) {
+            add_msp_membership(&msp_id, &org.uuid, &staff.user_uuid, &grant, &headers.user.email, &conn).await?;
         }
     }
 
@@ -474,16 +587,94 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
 struct AddStaffData {
     email: String,
     role: String,
+    /// For a technician: what they get in the MSP's clients. Without it,
+    /// every client as admin, with install commands.
+    access: Option<TechnicianAccess>,
 }
 
-/// Puts someone on the MSP's staff and adds them to every client, waiting for
-/// the org key.
-async fn add_to_staff(msp_id: &MspId, user: &User, role: MspRole, added_by: &str, conn: &DbConn) -> EmptyResult {
-    MspStaff::new(msp_id.clone(), user.uuid.clone(), role).insert(conn).await?;
-    for client in MspClient::find_by_msp(msp_id, conn).await {
-        add_msp_membership(msp_id, &client.org_uuid, &user.uuid, role, added_by, conn).await?;
+/// Puts someone on the MSP's staff and adds them to the clients they reach,
+/// waiting for the org key.
+async fn add_to_staff(
+    msp_id: &MspId,
+    user: &User,
+    role: MspRole,
+    access: Option<&TechnicianAccess>,
+    added_by: &str,
+    conn: &DbConn,
+) -> EmptyResult {
+    let mut staff = MspStaff::new(msp_id.clone(), user.uuid.clone(), role);
+    staff.insert(conn).await?;
+    if role == MspRole::Technician
+        && let Some(access) = access
+    {
+        staff.set_access(access, conn).await?;
     }
-    Ok(())
+    sync_staff_memberships(msp_id, &staff, added_by, conn).await
+}
+
+/// Checks a technician's access before storing it: chosen clients must be the
+/// MSP's own, and a custom role needs at least one permission.
+async fn validate_access(
+    msp_id: &MspId,
+    mut access: TechnicianAccess,
+    conn: &DbConn,
+) -> Result<TechnicianAccess, crate::error::Error> {
+    if access.all_clients {
+        access.clients.clear();
+    } else {
+        let clients: HashSet<OrganizationId> =
+            MspClient::find_by_msp(msp_id, conn).await.into_iter().map(|c| c.org_uuid).collect();
+        let mut seen = HashSet::new();
+        access.clients.retain(|c| seen.insert(c.clone()));
+        if access.clients.iter().any(|c| !clients.contains(c)) {
+            err!("Client not found")
+        }
+    }
+    if access.custom.as_ref().is_some_and(|c| !c.permissions.any()) {
+        err!("Choose at least one permission for the custom role")
+    }
+    Ok(access)
+}
+
+/// A technician's access in a few words, for the audit log, with client
+/// names copied in.
+async fn describe_access(access: &TechnicianAccess, conn: &DbConn) -> String {
+    let clients = if access.all_clients {
+        "every client".to_owned()
+    } else {
+        let mut names = Vec::new();
+        for id in &access.clients {
+            if let Some(org) = Organization::find_by_uuid(id, conn).await {
+                names.push(org.name);
+            }
+        }
+        names.sort();
+        match names.as_slice() {
+            [] => "no clients".to_owned(),
+            [one] => one.clone(),
+            [first, second] => format!("{first} and {second}"),
+            [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+        }
+    };
+    let role = match &access.custom {
+        None => "as admin".to_owned(),
+        Some(custom) => {
+            let permissions: Vec<&str> =
+                Permission::ALL.iter().filter(|p| custom.permissions.has(**p)).map(|p| p.label()).collect();
+            let items = if custom.vault_items {
+                "with vault items"
+            } else {
+                "no vault items"
+            };
+            format!("custom role ({}), {items}", permissions.join(", "))
+        }
+    };
+    let install = if access.install_commands {
+        "install commands"
+    } else {
+        "no install commands"
+    };
+    format!("{clients}, {role}, {install}")
 }
 
 fn invite_url(token: &str) -> String {
@@ -496,8 +687,14 @@ fn invite_url(token: &str) -> String {
 #[post("/keykeeper/msp/<msp_id>/staff", data = "<data>")]
 async fn add_staff(msp_id: MspId, headers: Headers, data: Json<AddStaffData>, conn: DbConn) -> JsonResult {
     require_admin(&msp_id, &headers.user.uuid, &conn).await?;
+    let data = data.into_inner();
     let Some(role) = MspRole::from_str(&data.role) else {
         err!("Role must be admin or technician")
+    };
+    // MSP admins are owners of every client, so access applies to technicians only.
+    let access = match (role, data.access) {
+        (MspRole::Technician, Some(access)) => Some(validate_access(&msp_id, access, &conn).await?),
+        _ => None,
     };
     let email = data.email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {
@@ -511,7 +708,7 @@ async fn add_staff(msp_id: MspId, headers: Headers, data: Json<AddStaffData>, co
         let Some(msp) = Msp::find_by_uuid(&msp_id, &conn).await else {
             err_code!("MSP not found", rocket::http::Status::NotFound.code)
         };
-        let invite = MspInvite::new(msp_id.clone(), &email, role, &headers.user.email);
+        let invite = MspInvite::new(msp_id.clone(), &email, role, access.as_ref(), &headers.user.email);
         invite.insert(&conn).await?;
         let url = invite_url(&invite.token);
         let emailed = CONFIG.mail_enabled();
@@ -524,6 +721,10 @@ async fn add_staff(msp_id: MspId, headers: Headers, data: Json<AddStaffData>, co
             crate::mail::send_msp_invite(&email, &msp.name, role_name, &headers.user.email, &url).await?;
         }
         Audit::by("staff_invited", &headers).target(&email).detail(role.as_str()).record(&msp_id, &conn).await?;
+        if let Some(access) = &access {
+            let detail = describe_access(access, &conn).await;
+            Audit::by("staff_access_changed", &headers).target(&email).detail(detail).record(&msp_id, &conn).await?;
+        }
         return Ok(Json(json!({
             "invited": true,
             "inviteId": invite.uuid,
@@ -537,8 +738,12 @@ async fn add_staff(msp_id: MspId, headers: Headers, data: Json<AddStaffData>, co
     if MspStaff::find(&msp_id, &user.uuid, &conn).await.is_some() {
         err!("They're already on your staff")
     }
-    add_to_staff(&msp_id, &user, role, &headers.user.email, &conn).await?;
+    add_to_staff(&msp_id, &user, role, access.as_ref(), &headers.user.email, &conn).await?;
     Audit::by("staff_added", &headers).target(&user.email).detail(role.as_str()).record(&msp_id, &conn).await?;
+    if let Some(access) = &access {
+        let detail = describe_access(access, &conn).await;
+        Audit::by("staff_access_changed", &headers).target(&user.email).detail(detail).record(&msp_id, &conn).await?;
+    }
     Ok(Json(json!({
         "invited": false,
         "userId": user.uuid,
@@ -601,7 +806,14 @@ async fn accept_invite(data: Json<InviteTokenData>, headers: Headers, conn: DbCo
     };
     let msp_id = invite.msp_uuid.clone();
     if MspStaff::find(&msp_id, &headers.user.uuid, &conn).await.is_none() {
-        add_to_staff(&msp_id, &headers.user, role, &invite.invited_by_email, &conn).await?;
+        // Clients removed since the invitation drop out of its access.
+        let mut access = invite.access();
+        if let Some(access) = &mut access {
+            let clients: HashSet<OrganizationId> =
+                MspClient::find_by_msp(&msp_id, &conn).await.into_iter().map(|c| c.org_uuid).collect();
+            access.clients.retain(|c| clients.contains(c));
+        }
+        add_to_staff(&msp_id, &headers.user, role, access.as_ref(), &invite.invited_by_email, &conn).await?;
         Audit::by("staff_invite_accepted", &headers)
             .target(&headers.user.email)
             .detail(role.as_str())
@@ -618,7 +830,9 @@ struct ChangeStaffRoleData {
     role: String,
 }
 
-/// Changes a staff member's role, and their role in every client with it.
+/// Changes a staff member's role, and their role in every client with it. A
+/// technician made an admin becomes an owner of every client; an admin made a
+/// technician gets the access stored for them, every client as admin if none.
 #[put("/keykeeper/msp/<msp_id>/staff/<user_id>", data = "<data>")]
 async fn change_staff_role(
     msp_id: MspId,
@@ -640,17 +854,41 @@ async fn change_staff_role(
     if role == MspRole::Technician {
         ensure_another_admin(&msp_id, &user_id, &conn).await?;
     }
-    let mut memberships = staff_memberships(&msp_id, &user_id, &conn).await;
     if role == MspRole::Technician {
-        ensure_owners_remain(&memberships, &conn).await?;
+        ensure_owners_remain(&staff_memberships(&msp_id, &user_id, &conn).await, &conn).await?;
     }
     staff.set_role(role, &conn).await?;
-    for member in &mut memberships {
-        member.atype = role.membership_type() as i32;
-        member.save(&conn).await?;
-    }
+    sync_staff_memberships(&msp_id, &staff, &headers.user.email, &conn).await?;
     let email = User::find_by_uuid(&user_id, &conn).await.map(|u| u.email).unwrap_or_default();
     Audit::by("staff_role_changed", &headers).target(&email).detail(role.as_str()).record(&msp_id, &conn).await
+}
+
+/// Sets which clients a technician reaches, their role inside them, and
+/// whether they see install commands, and applies it to all of their client
+/// memberships at once. MSP admins only, and only for technicians: MSP admins
+/// are owners of every client.
+#[put("/keykeeper/msp/<msp_id>/staff/<user_id>/access", data = "<data>")]
+async fn set_staff_access(
+    msp_id: MspId,
+    user_id: UserId,
+    headers: Headers,
+    data: Json<TechnicianAccess>,
+    conn: DbConn,
+) -> JsonResult {
+    require_admin(&msp_id, &headers.user.uuid, &conn).await?;
+    let Some(mut staff) = MspStaff::find(&msp_id, &user_id, &conn).await else {
+        err_code!("Staff member not found", rocket::http::Status::NotFound.code)
+    };
+    if staff.role() != Some(MspRole::Technician) {
+        err!("MSP admins are owners of every client. Make them a technician to limit their access.")
+    }
+    let access = validate_access(&msp_id, data.into_inner(), &conn).await?;
+    staff.set_access(&access, &conn).await?;
+    sync_staff_memberships(&msp_id, &staff, &headers.user.email, &conn).await?;
+    let email = User::find_by_uuid(&user_id, &conn).await.map(|u| u.email).unwrap_or_default();
+    let detail = describe_access(&access, &conn).await;
+    Audit::by("staff_access_changed", &headers).target(&email).detail(detail).record(&msp_id, &conn).await?;
+    Ok(Json(json!(access)))
 }
 
 async fn ensure_another_admin(msp_id: &MspId, user_id: &UserId, conn: &DbConn) -> EmptyResult {
@@ -744,8 +982,9 @@ fn parse_before(before: Option<&str>) -> Result<Option<chrono::NaiveDateTime>, c
     Ok(Some(time.naive_utc()))
 }
 
-/// The MSP's audit log, newest first. Any of its staff. Pages with `before`,
-/// the time of the oldest entry already shown.
+/// The MSP's audit log, newest first. Any of its staff, though a technician
+/// limited to chosen clients doesn't see entries about other clients. Pages
+/// with `before`, the time of the oldest entry already shown.
 #[get("/keykeeper/msp/<msp_id>/events?<before>&<limit>")]
 async fn list_events(
     msp_id: MspId,
@@ -754,10 +993,11 @@ async fn list_events(
     headers: Headers,
     conn: DbConn,
 ) -> JsonResult {
-    staff_role(&msp_id, &headers.user.uuid, &conn).await?;
+    let caller = staff_member(&msp_id, &headers.user.uuid, &conn).await?;
+    let only = caller.reach(&conn).await.map(|r| r.into_iter().collect());
     let before_time = parse_before(before.as_deref())?;
     let limit = limit.unwrap_or(100).clamp(1, MAX_EVENTS);
-    let events: Vec<Value> = MspEvent::find_by_msp(&msp_id, before_time, limit, &conn)
+    let events: Vec<Value> = MspEvent::find_by_msp(&msp_id, before_time, only, limit, &conn)
         .await
         .into_iter()
         .map(|e| {

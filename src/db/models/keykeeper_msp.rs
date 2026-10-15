@@ -4,6 +4,13 @@
 // listed, re-roled, and removed together. No keys live here: staff get each
 // organization's key the normal way, when a member who holds it confirms them.
 // See DESIGN.md, "MSP console", in the keykeeper repo.
+//
+// Technicians can be limited: to chosen clients rather than every client, to a
+// custom role rather than admin inside them (with or without vault items), and
+// without the clients' install commands. MSP admins always reach every client
+// as owners. See DESIGN.md, "Roles and permissions".
+
+use std::collections::HashSet;
 
 use chrono::{NaiveDateTime, Utc};
 use derive_more::{AsRef, Deref, Display, From};
@@ -14,14 +21,15 @@ use crate::{
     db::{
         DbConn,
         keykeeper_schema::{
-            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_staff, msps,
+            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_staff, msp_staff_clients,
+            msps,
         },
     },
     error::MapResult,
 };
 use macros::UuidFromParam;
 
-use super::{CollectionId, MembershipId, MembershipType, OrganizationId, UserId};
+use super::{CollectionId, MembershipId, MembershipType, OrganizationId, UserId, keykeeper_roles::CustomPermissions};
 
 // Our migrations exist for SQLite and PostgreSQL only.
 #[cfg(feature = "mysql")]
@@ -106,6 +114,60 @@ pub struct MspStaff {
     pub user_uuid: UserId,
     pub role: i32,
     pub created_at: NaiveDateTime,
+    /// Technicians: every client, or only those in msp_staff_clients.
+    pub all_clients: bool,
+    /// Technicians: a CustomRole as JSON, or none for admin in each client.
+    pub client_access: Option<String>,
+    /// Technicians: whether they see clients' install commands.
+    pub install_commands: bool,
+}
+
+/// A client a technician without every client reaches.
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_staff_clients)]
+#[diesel(primary_key(msp_uuid, user_uuid, org_uuid))]
+pub struct MspStaffClient {
+    pub msp_uuid: MspId,
+    pub user_uuid: UserId,
+    pub org_uuid: OrganizationId,
+}
+
+/// What a technician gets in the MSP's clients. MSP admins don't have one:
+/// they're owners of every client.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TechnicianAccess {
+    /// Every client, including new ones. Otherwise only `clients`.
+    pub all_clients: bool,
+    #[serde(default)]
+    pub clients: Vec<OrganizationId>,
+    /// A custom role in each client, or none for admin.
+    #[serde(default)]
+    pub custom: Option<CustomRole>,
+    pub install_commands: bool,
+}
+
+impl Default for TechnicianAccess {
+    /// Every client, as admin, with install commands: what technicians got
+    /// before access could be limited.
+    fn default() -> Self {
+        Self {
+            all_clients: true,
+            clients: Vec::new(),
+            custom: None,
+            install_commands: true,
+        }
+    }
+}
+
+/// A technician's custom role inside each client they reach.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRole {
+    pub permissions: CustomPermissions,
+    /// Sees and edits every vault item in the client (access to all collections).
+    #[serde(default)]
+    pub vault_items: bool,
 }
 
 #[derive(Identifiable, Queryable, Insertable)]
@@ -180,11 +242,109 @@ impl MspStaff {
             user_uuid,
             role: role as i32,
             created_at: Utc::now().naive_utc(),
+            all_clients: true,
+            client_access: None,
+            install_commands: true,
         }
     }
 
     pub fn role(&self) -> Option<MspRole> {
         MspRole::from_i32(self.role)
+    }
+
+    /// A technician's custom role, if they have one. A value that doesn't
+    /// parse gives a custom role with no permissions, never admin.
+    pub fn custom_role(&self) -> Option<CustomRole> {
+        let raw = self.client_access.as_deref()?;
+        Some(serde_json::from_str(raw).unwrap_or(CustomRole {
+            permissions: CustomPermissions::default(),
+            vault_items: false,
+        }))
+    }
+
+    /// The clients this person reaches: None for every client. MSP admins
+    /// always reach every client.
+    pub async fn reach(&self, conn: &DbConn) -> Option<HashSet<OrganizationId>> {
+        if self.role() == Some(MspRole::Admin) || self.all_clients {
+            return None;
+        }
+        let (msp, user) = (self.msp_uuid.clone(), self.user_uuid.clone());
+        let chosen: Vec<OrganizationId> = conn
+            .run(move |conn| {
+                msp_staff_clients::table
+                    .filter(msp_staff_clients::msp_uuid.eq(msp))
+                    .filter(msp_staff_clients::user_uuid.eq(user))
+                    .select(msp_staff_clients::org_uuid)
+                    .load(conn)
+                    .unwrap_or_default()
+            })
+            .await;
+        Some(chosen.into_iter().collect())
+    }
+
+    /// A technician's access, as stored.
+    pub async fn access(&self, conn: &DbConn) -> TechnicianAccess {
+        let mut clients: Vec<OrganizationId> = self.reach(conn).await.unwrap_or_default().into_iter().collect();
+        clients.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        TechnicianAccess {
+            all_clients: self.all_clients,
+            clients,
+            custom: self.custom_role(),
+            install_commands: self.install_commands,
+        }
+    }
+
+    /// Stores a technician's access. Doesn't touch their memberships.
+    pub async fn set_access(&mut self, access: &TechnicianAccess, conn: &DbConn) -> EmptyResult {
+        self.all_clients = access.all_clients;
+        self.client_access = access.custom.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default());
+        self.install_commands = access.install_commands;
+        let (msp, user) = (self.msp_uuid.clone(), self.user_uuid.clone());
+        let (all_clients, client_access, install_commands) =
+            (self.all_clients, self.client_access.clone(), self.install_commands);
+        let chosen: Vec<MspStaffClient> = if access.all_clients {
+            Vec::new()
+        } else {
+            access
+                .clients
+                .iter()
+                .map(|org| MspStaffClient {
+                    msp_uuid: msp.clone(),
+                    user_uuid: user.clone(),
+                    org_uuid: org.clone(),
+                })
+                .collect()
+        };
+        conn.run(move |conn| {
+            diesel::update(
+                msp_staff::table.filter(msp_staff::msp_uuid.eq(&msp)).filter(msp_staff::user_uuid.eq(&user)),
+            )
+            .set((
+                msp_staff::all_clients.eq(all_clients),
+                msp_staff::client_access.eq(client_access),
+                msp_staff::install_commands.eq(install_commands),
+            ))
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error changing a technician's access")?;
+            diesel::delete(
+                msp_staff_clients::table
+                    .filter(msp_staff_clients::msp_uuid.eq(&msp))
+                    .filter(msp_staff_clients::user_uuid.eq(&user)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error changing a technician's clients")?;
+            for row in &chosen {
+                diesel::insert_into(msp_staff_clients::table)
+                    .values(row)
+                    .execute(conn)
+                    .map(|_| ())
+                    .map_res("Error changing a technician's clients")?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn insert(&self, conn: &DbConn) -> EmptyResult {
@@ -208,6 +368,14 @@ impl MspStaff {
 
     pub async fn delete(self, conn: &DbConn) -> EmptyResult {
         conn.run(move |conn| {
+            diesel::delete(
+                msp_staff_clients::table
+                    .filter(msp_staff_clients::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_staff_clients::user_uuid.eq(&self.user_uuid)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error removing MSP staff")?;
             diesel::delete(
                 msp_staff::table
                     .filter(msp_staff::msp_uuid.eq(self.msp_uuid))
@@ -308,8 +476,18 @@ impl MspClient {
         .await
     }
 
+    /// Ends the MSP's relationship with this client, including technicians'
+    /// choice of it.
     pub async fn delete(self, conn: &DbConn) -> EmptyResult {
         conn.run(move |conn| {
+            diesel::delete(
+                msp_staff_clients::table
+                    .filter(msp_staff_clients::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_staff_clients::org_uuid.eq(&self.org_uuid)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error removing MSP client")?;
             diesel::delete(msp_clients::table.filter(msp_clients::org_uuid.eq(self.org_uuid)))
                 .execute(conn)
                 .map_res("Error removing MSP client")
@@ -440,12 +618,22 @@ impl MspEvent {
         .await
     }
 
-    /// The newest events first, older than `before` if given.
-    pub async fn find_by_msp(msp_uuid: &MspId, before: Option<NaiveDateTime>, limit: i64, conn: &DbConn) -> Vec<Self> {
+    /// The newest events first, older than `before` if given. With `only`,
+    /// just the MSP-wide events and those about the clients listed.
+    pub async fn find_by_msp(
+        msp_uuid: &MspId,
+        before: Option<NaiveDateTime>,
+        only: Option<Vec<OrganizationId>>,
+        limit: i64,
+        conn: &DbConn,
+    ) -> Vec<Self> {
         conn.run(move |conn| {
             let mut query = msp_events::table.filter(msp_events::msp_uuid.eq(msp_uuid)).into_boxed();
             if let Some(before) = before {
                 query = query.filter(msp_events::created_at.lt(before));
+            }
+            if let Some(only) = only {
+                query = query.filter(msp_events::org_uuid.is_null().or(msp_events::org_uuid.eq_any(only)));
             }
             query.order(msp_events::created_at.desc()).limit(limit).load::<Self>(conn).unwrap_or_default()
         })
@@ -466,10 +654,18 @@ pub struct MspInvite {
     pub token: String,
     pub invited_by_email: String,
     pub created_at: NaiveDateTime,
+    /// For a technician: the TechnicianAccess they get on joining, as JSON.
+    pub access: Option<String>,
 }
 
 impl MspInvite {
-    pub fn new(msp_uuid: MspId, email: &str, role: MspRole, invited_by_email: &str) -> Self {
+    pub fn new(
+        msp_uuid: MspId,
+        email: &str,
+        role: MspRole,
+        access: Option<&TechnicianAccess>,
+        invited_by_email: &str,
+    ) -> Self {
         Self {
             uuid: crate::util::get_uuid(),
             msp_uuid,
@@ -478,11 +674,24 @@ impl MspInvite {
             token: crate::crypto::encode_random_bytes::<32>(&data_encoding::BASE64URL_NOPAD),
             invited_by_email: invited_by_email.to_owned(),
             created_at: Utc::now().naive_utc(),
+            access: access.map(|a| serde_json::to_string(a).unwrap_or_default()),
         }
     }
 
     pub fn role(&self) -> Option<MspRole> {
         MspRole::from_i32(self.role)
+    }
+
+    /// The access a technician invitation gives. A value that doesn't parse
+    /// gives no clients, never every client.
+    pub fn access(&self) -> Option<TechnicianAccess> {
+        let raw = self.access.as_deref()?;
+        Some(serde_json::from_str(raw).unwrap_or(TechnicianAccess {
+            all_clients: false,
+            clients: Vec::new(),
+            custom: None,
+            install_commands: false,
+        }))
     }
 
     pub async fn insert(&self, conn: &DbConn) -> EmptyResult {

@@ -12,14 +12,14 @@
 
 use rocket::{Route, serde::json::Json};
 
-use super::keykeeper_msp::{Audit, require_admin, staff_role};
+use super::keykeeper_msp::{Audit, require_admin, staff_member};
 use crate::{
     api::JsonResult,
     auth::Headers,
     db::{
         DbConn,
         models::{
-            CollectionUser, Membership, MembershipStatus, MembershipType, MspClient, MspEnrollmentJoin, MspId,
+            CollectionUser, Membership, MembershipStatus, MembershipType, MspClient, MspEnrollmentJoin, MspId, MspRole,
             OrgPolicy, Organization, OrganizationId,
         },
     },
@@ -47,11 +47,20 @@ fn enrollment_json(client: &MspClient, joins: i64) -> serde_json::Value {
     })
 }
 
-/// A client's enrollment token, for its install command. Any of the MSP's staff.
+/// A client's enrollment token, for its install command. MSP admins, and
+/// technicians who reach the client and are allowed install commands.
 #[get("/keykeeper/msp/<msp_id>/clients/<org_id>/enrollment")]
 async fn get_enrollment(msp_id: MspId, org_id: OrganizationId, headers: Headers, conn: DbConn) -> JsonResult {
-    staff_role(&msp_id, &headers.user.uuid, &conn).await?;
+    let staff = staff_member(&msp_id, &headers.user.uuid, &conn).await?;
     let client = msp_client(&msp_id, &org_id, &conn).await?;
+    if staff.role() == Some(MspRole::Technician) {
+        if staff.reach(&conn).await.is_some_and(|r| !r.contains(&org_id)) {
+            err_code!("Client not found", rocket::http::Status::NotFound.code)
+        }
+        if !staff.install_commands {
+            err_code!("Your MSP's admins haven't given you install commands", rocket::http::Status::Forbidden.code)
+        }
+    }
     let joins = MspEnrollmentJoin::count_by_org(&org_id, &conn).await;
     Ok(Json(enrollment_json(&client, joins)))
 }

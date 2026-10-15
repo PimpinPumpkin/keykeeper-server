@@ -15,6 +15,9 @@ table! {
         user_uuid -> Text,
         role -> Integer,
         created_at -> Timestamp,
+        all_clients -> Bool,
+        client_access -> Nullable<Text>,
+        install_commands -> Bool,
     }
 }
 
@@ -70,6 +73,7 @@ table! {
         token -> Text,
         invited_by_email -> Text,
         created_at -> Timestamp,
+        access -> Nullable<Text>,
     }
 }
 
@@ -77,5 +81,13 @@ table! {
     membership_permissions (membership_uuid) {
         membership_uuid -> Text,
         permissions -> Text,
+    }
+}
+
+table! {
+    msp_staff_clients (msp_uuid, user_uuid, org_uuid) {
+        msp_uuid -> Text,
+        user_uuid -> Text,
+        org_uuid -> Text,
     }
 }
