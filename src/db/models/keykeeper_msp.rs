@@ -13,7 +13,9 @@ use crate::{
     api::EmptyResult,
     db::{
         DbConn,
-        keykeeper_schema::{msp_clients, msp_enrollment_joins, msp_memberships, msp_staff, msps},
+        keykeeper_schema::{
+            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_staff, msps,
+        },
     },
     error::MapResult,
 };
@@ -391,6 +393,150 @@ impl MspEnrollmentJoin {
                 .count()
                 .first::<i64>(conn)
                 .unwrap_or(0)
+        })
+        .await
+    }
+}
+
+/// One entry in an MSP's audit log.
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_events)]
+#[diesel(primary_key(uuid))]
+pub struct MspEvent {
+    pub uuid: String,
+    pub msp_uuid: MspId,
+    pub created_at: NaiveDateTime,
+    pub event: String,
+    pub actor_uuid: Option<UserId>,
+    pub actor_email: Option<String>,
+    pub org_uuid: Option<OrganizationId>,
+    pub org_name: Option<String>,
+    pub target_email: Option<String>,
+    pub detail: Option<String>,
+    pub ip: Option<String>,
+}
+
+impl MspEvent {
+    pub fn new(msp_uuid: MspId, event: &str) -> Self {
+        Self {
+            uuid: crate::util::get_uuid(),
+            msp_uuid,
+            created_at: Utc::now().naive_utc(),
+            event: event.to_owned(),
+            actor_uuid: None,
+            actor_email: None,
+            org_uuid: None,
+            org_name: None,
+            target_email: None,
+            detail: None,
+            ip: None,
+        }
+    }
+
+    pub async fn insert(&self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::insert_into(msp_events::table).values(self).execute(conn).map_res("Error recording an MSP event")
+        })
+        .await
+    }
+
+    /// The newest events first, older than `before` if given.
+    pub async fn find_by_msp(msp_uuid: &MspId, before: Option<NaiveDateTime>, limit: i64, conn: &DbConn) -> Vec<Self> {
+        conn.run(move |conn| {
+            let mut query = msp_events::table.filter(msp_events::msp_uuid.eq(msp_uuid)).into_boxed();
+            if let Some(before) = before {
+                query = query.filter(msp_events::created_at.lt(before));
+            }
+            query.order(msp_events::created_at.desc()).limit(limit).load::<Self>(conn).unwrap_or_default()
+        })
+        .await
+    }
+}
+
+/// An invitation to an MSP's staff. Accepting needs the token, which goes only
+/// to the invited address, and an account with that address.
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_invites)]
+#[diesel(primary_key(uuid))]
+pub struct MspInvite {
+    pub uuid: String,
+    pub msp_uuid: MspId,
+    pub email: String,
+    pub role: i32,
+    pub token: String,
+    pub invited_by_email: String,
+    pub created_at: NaiveDateTime,
+}
+
+impl MspInvite {
+    pub fn new(msp_uuid: MspId, email: &str, role: MspRole, invited_by_email: &str) -> Self {
+        Self {
+            uuid: crate::util::get_uuid(),
+            msp_uuid,
+            email: email.trim().to_lowercase(),
+            role: role as i32,
+            token: crate::crypto::encode_random_bytes::<32>(&data_encoding::BASE64URL_NOPAD),
+            invited_by_email: invited_by_email.to_owned(),
+            created_at: Utc::now().naive_utc(),
+        }
+    }
+
+    pub fn role(&self) -> Option<MspRole> {
+        MspRole::from_i32(self.role)
+    }
+
+    pub async fn insert(&self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::insert_into(msp_invites::table).values(self).execute(conn).map_res("Error saving an MSP invite")
+        })
+        .await
+    }
+
+    pub async fn delete(self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::delete(msp_invites::table.filter(msp_invites::uuid.eq(self.uuid)))
+                .execute(conn)
+                .map_res("Error removing an MSP invite")
+        })
+        .await
+    }
+
+    pub async fn find_by_token(token: &str, conn: &DbConn) -> Option<Self> {
+        let token = token.to_owned();
+        conn.run(move |conn| msp_invites::table.filter(msp_invites::token.eq(token)).first::<Self>(conn).ok()).await
+    }
+
+    pub async fn find_by_msp_and_email(msp_uuid: &MspId, email: &str, conn: &DbConn) -> Option<Self> {
+        let email = email.trim().to_lowercase();
+        conn.run(move |conn| {
+            msp_invites::table
+                .filter(msp_invites::msp_uuid.eq(msp_uuid))
+                .filter(msp_invites::email.eq(email))
+                .first::<Self>(conn)
+                .ok()
+        })
+        .await
+    }
+
+    pub async fn find_by_msp_and_uuid(msp_uuid: &MspId, uuid: &str, conn: &DbConn) -> Option<Self> {
+        let uuid = uuid.to_owned();
+        conn.run(move |conn| {
+            msp_invites::table
+                .filter(msp_invites::msp_uuid.eq(msp_uuid))
+                .filter(msp_invites::uuid.eq(uuid))
+                .first::<Self>(conn)
+                .ok()
+        })
+        .await
+    }
+
+    pub async fn find_by_msp(msp_uuid: &MspId, conn: &DbConn) -> Vec<Self> {
+        conn.run(move |conn| {
+            msp_invites::table
+                .filter(msp_invites::msp_uuid.eq(msp_uuid))
+                .order(msp_invites::created_at.asc())
+                .load::<Self>(conn)
+                .unwrap_or_default()
         })
         .await
     }

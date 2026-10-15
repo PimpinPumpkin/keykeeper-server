@@ -44,3 +44,31 @@ table! {
         msp_uuid -> Text,
     }
 }
+
+table! {
+    msp_events (uuid) {
+        uuid -> Text,
+        msp_uuid -> Text,
+        created_at -> Timestamp,
+        event -> Text,
+        actor_uuid -> Nullable<Text>,
+        actor_email -> Nullable<Text>,
+        org_uuid -> Nullable<Text>,
+        org_name -> Nullable<Text>,
+        target_email -> Nullable<Text>,
+        detail -> Nullable<Text>,
+        ip -> Nullable<Text>,
+    }
+}
+
+table! {
+    msp_invites (uuid) {
+        uuid -> Text,
+        msp_uuid -> Text,
+        email -> Text,
+        role -> Integer,
+        token -> Text,
+        invited_by_email -> Text,
+        created_at -> Timestamp,
+    }
+}

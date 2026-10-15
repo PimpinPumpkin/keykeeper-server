@@ -338,6 +338,22 @@ pub async fn send_invite(
     send_email(&user.email, &subject, body_html, body_text).await
 }
 
+/// Keykeeper: an invitation to join an MSP's staff, for someone who may not
+/// have an account yet.
+pub async fn send_msp_invite(address: &str, msp_name: &str, role: &str, invited_by: &str, url: &str) -> EmptyResult {
+    let (subject, body_html, body_text) = get_text(
+        "email/keykeeper_msp_invite",
+        json!({
+            "url": url,
+            "img_src": CONFIG._smtp_img_src(),
+            "msp_name": msp_name,
+            "role": role,
+            "invited_by": invited_by,
+        }),
+    )?;
+    send_email(address, &subject, body_html, body_text).await
+}
+
 pub async fn send_emergency_access_invite(
     address: &str,
     user_id: UserId,

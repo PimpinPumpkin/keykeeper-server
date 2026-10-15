@@ -12,7 +12,7 @@
 
 use rocket::{Route, serde::json::Json};
 
-use super::keykeeper_msp::{require_admin, staff_role};
+use super::keykeeper_msp::{Audit, require_admin, staff_role};
 use crate::{
     api::JsonResult,
     auth::Headers,
@@ -63,6 +63,8 @@ async fn replace_enrollment(msp_id: MspId, org_id: OrganizationId, headers: Head
     require_admin(&msp_id, &headers.user.uuid, &conn).await?;
     let mut client = msp_client(&msp_id, &org_id, &conn).await?;
     client.replace_enrollment_token(&conn).await?;
+    let org_name = Organization::find_by_uuid(&org_id, &conn).await.map(|o| o.name).unwrap_or_default();
+    Audit::by("install_token_replaced", &headers).org(&org_id, &org_name).record(&msp_id, &conn).await?;
     let joins = MspEnrollmentJoin::count_by_org(&org_id, &conn).await;
     Ok(Json(enrollment_json(&client, joins)))
 }
@@ -147,6 +149,11 @@ async fn join(data: Json<JoinData>, headers: Headers, conn: DbConn) -> JsonResul
         CollectionUser::save(&headers.user.uuid, collection, false, false, false, &conn).await?;
     }
     MspEnrollmentJoin::new(member_id, org.uuid.clone()).insert(&conn).await?;
+    Audit::by("joined_with_install_command", &headers)
+        .org(&org.uuid, &org.name)
+        .target(&headers.user.email)
+        .record(&client.msp_uuid, &conn)
+        .await?;
 
     Ok(joined(MembershipStatus::Accepted as i32))
 }

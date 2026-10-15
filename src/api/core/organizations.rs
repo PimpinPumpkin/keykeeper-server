@@ -1427,6 +1427,18 @@ async fn confirm_invite_impl(
         nt.send_user_update(UpdateType::SyncOrgKeys, &user, headers.device.push_uuid.as_ref(), conn).await;
     }
 
+    // Keykeeper: confirmations in an MSP's clients go in the MSP's audit log.
+    if save_result.is_ok() {
+        super::keykeeper_msp::record_member_confirmed(
+            org_id,
+            &member_to_confirm.user_uuid,
+            &headers.user,
+            headers.ip.ip.to_string(),
+            conn,
+        )
+        .await?;
+    }
+
     save_result
 }
 
