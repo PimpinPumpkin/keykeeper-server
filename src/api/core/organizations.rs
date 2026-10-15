@@ -358,7 +358,9 @@ async fn get_org_collections(org_id: OrganizationId, headers: ManagerHeadersLoos
         err!("Organization not found", "Organization id's do not match");
     }
 
-    if !headers.membership.has_full_access() {
+    // Keykeeper: a custom role the guard admitted here reads the list for the
+    // Members page, without access to all items.
+    if !headers.membership.has_full_access() && headers.custom_permissions.is_none() {
         err_code!("Resource not found.", "User does not have full access", Status::NotFound.code);
     }
 

@@ -876,7 +876,13 @@ impl<'r> FromRequest<'r> for AdminHeaders {
                 custom_permissions: Some(role),
             })
         } else {
-            err_handler!("You need to be Admin or Owner to call this endpoint")
+            // Keykeeper: 403 for a custom member, 401 for everyone else.
+            crate::db::models::keykeeper_roles::refuse(
+                request,
+                &headers.membership,
+                "You need to be Admin or Owner to call this endpoint",
+            )
+            .await
         }
     }
 }
@@ -938,7 +944,13 @@ impl<'r> FromRequest<'r> for ManagerHeaders {
                 org_id: headers.membership.org_uuid,
             })
         } else {
-            err_handler!("You need to be a Manager, Admin or Owner to call this endpoint")
+            // Keykeeper: 403 for a custom member, 401 for everyone else.
+            crate::db::models::keykeeper_roles::refuse(
+                request,
+                &headers.membership,
+                "You need to be a Manager, Admin or Owner to call this endpoint",
+            )
+            .await
         }
     }
 }
@@ -994,7 +1006,13 @@ impl<'r> FromRequest<'r> for ManagerHeadersLoose {
                 ip: headers.ip,
             })
         } else {
-            err_handler!("You need to be a Manager, Admin or Owner to call this endpoint")
+            // Keykeeper: 403 for a custom member, 401 for everyone else.
+            crate::db::models::keykeeper_roles::refuse(
+                request,
+                &headers.membership,
+                "You need to be a Manager, Admin or Owner to call this endpoint",
+            )
+            .await
         }
     }
 }
@@ -1056,7 +1074,13 @@ impl<'r> FromRequest<'r> for OwnerHeaders {
                 org_id: headers.membership.org_uuid,
             })
         } else {
-            err_handler!("You need to be Owner to call this endpoint")
+            // Keykeeper: 403 for a custom member, 401 for everyone else.
+            crate::db::models::keykeeper_roles::refuse(
+                request,
+                &headers.membership,
+                "You need to be Owner to call this endpoint",
+            )
+            .await
         }
     }
 }

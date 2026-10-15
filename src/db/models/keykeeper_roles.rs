@@ -8,11 +8,20 @@
 // on themselves, admins, owners, or other custom members, and they can't grant
 // roles, permissions, or access to all items. See DESIGN.md, "Roles and
 // permissions".
+//
+// Endpoints a custom member's permissions don't cover refuse them with 403, not
+// upstream's 401, so a client can tell a missing permission from an expired
+// session.
 
 use std::collections::HashMap;
 
 use diesel::prelude::*;
-use rocket::{Request, http::Method};
+use rocket::{
+    Request,
+    http::{Method, Status},
+    outcome::Outcome,
+    request,
+};
 use serde_json::Value;
 
 use crate::{
@@ -75,6 +84,11 @@ const ROUTES: &[(Method, &str, &[Permission])] = &[
     (Method::Put, "/organizations/<org_id>/users/restore", &[ManageUsers]),
     (Method::Put, "/organizations/<org_id>/users/<member_id>/restore", &[ManageUsers]),
     (Method::Put, "/organizations/<org_id>/users/<member_id>/restore/vnext", &[ManageUsers]),
+    // The Members page loads the collection list for its Collections column.
+    (Method::Get, "/organizations/<org_id>/collections", &[ManageUsers, ManageResetPassword]),
+    // The invite and edit dialogs load this one. For a member without access
+    // to all items it lists only the collections they're assigned to.
+    (Method::Get, "/organizations/<org_id>/collections/details", &[ManageUsers]),
     // Account recovery
     (Method::Get, "/organizations/<org_id>/users/<member_id>/reset-password-details", &[ManageResetPassword]),
     (Method::Put, "/organizations/<org_id>/users/<member_id>/recover-account", &[ManageResetPassword]),
@@ -220,11 +234,32 @@ pub async fn admitted(request: &Request<'_>, member: &Membership) -> Option<Cust
     if needed.is_empty() || member.atype != MembershipType::User as i32 {
         return None;
     }
-    let rocket::outcome::Outcome::Success(conn) = request.guard::<DbConn>().await else {
+    let Outcome::Success(conn) = request.guard::<DbConn>().await else {
         return None;
     };
     let role = find(&member.uuid, &conn).await?;
     needed.iter().any(|p| role.has(*p)).then_some(role)
+}
+
+/// For the org guards, when they turn a member away: 403 for a custom member,
+/// whose session is fine but whose role doesn't cover this endpoint, and
+/// upstream's 401 for everyone else.
+pub async fn refuse<S>(
+    request: &Request<'_>,
+    member: &Membership,
+    message: &'static str,
+) -> request::Outcome<S, &'static str> {
+    let custom = member.atype == MembershipType::User as i32
+        && match request.guard::<DbConn>().await {
+            Outcome::Success(conn) => find(&member.uuid, &conn).await.is_some(),
+            _ => false,
+        };
+    if custom {
+        error!(target: "auth", "Forbidden Error: {message}");
+        return Outcome::Error((Status::Forbidden, message));
+    }
+    error!(target: "auth", "Unauthorized Error: {message}");
+    Outcome::Error((Status::Unauthorized, message))
 }
 
 /// Refuses a custom member's action on anyone but a regular member: not
@@ -293,6 +328,17 @@ mod tests {
         assert!(route_permissions(Method::Post, "/organizations/<org_id>/api-key").is_empty());
         assert!(route_permissions(Method::Put, "/organizations/<org_id>").is_empty());
         assert_eq!(route_permissions(Method::Put, "/organizations/<org_id>/policies/<pol_type>"), &[ManagePolicies]);
+    }
+
+    #[test]
+    fn the_members_page_and_member_dialog_can_load_their_collections() {
+        assert_eq!(
+            route_permissions(Method::Get, "/organizations/<org_id>/collections"),
+            route_permissions(Method::Get, "/organizations/<org_id>/users")
+        );
+        assert_eq!(route_permissions(Method::Get, "/organizations/<org_id>/collections/details"), &[ManageUsers]);
+        assert!(route_permissions(Method::Post, "/organizations/<org_id>/collections").is_empty());
+        assert!(route_permissions(Method::Get, "/organizations/<org_id>/collections/<col_id>/details").is_empty());
     }
 
     #[test]
