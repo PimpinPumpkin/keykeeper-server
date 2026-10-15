@@ -21,7 +21,7 @@ use crate::{
         DbConn,
         models::{
             Collection, Membership, MembershipId, MembershipStatus, MembershipType, Msp, MspClient, MspId,
-            MspMembership, MspRole, MspStaff, Organization, OrganizationId, User, UserId,
+            MspMembership, MspRole, MspStaff, OrgPolicy, OrgPolicyType, Organization, OrganizationId, User, UserId,
         },
     },
 };
@@ -213,6 +213,7 @@ async fn get_msp(msp_id: MspId, headers: Headers, conn: DbConn) -> JsonResult {
         clients.push(json!({
             "id": org.uuid,
             "name": org.name,
+            "preset": client.preset,
             "createdAt": crate::util::format_date(&client.created_at),
             "members": { "confirmed": confirmed, "accepted": accepted, "invited": invited, "revoked": revoked },
             "you": you,
@@ -235,13 +236,47 @@ struct ClientKeys {
     public_key: String,
 }
 
+/// The Business preset: the defaults a business client starts with, so its
+/// admins never have to build policies to get them. Every one is an upstream
+/// policy the client's owners can change later in its admin console. See
+/// DESIGN.md, "Defaults (Business preset)".
+const BUSINESS_PRESET: &str = "business";
+
+fn business_policies() -> Vec<(OrgPolicyType, Value)> {
+    vec![
+        // Account recovery, with automatic enrollment: a member who forgets
+        // their master password can be let back in by an owner or admin.
+        (OrgPolicyType::ResetPassword, json!({ "autoEnrollEnabled": true })),
+        // A strong master password: at least 12 characters and a strength
+        // score of 3 out of 4. Existing passwords aren't forced to change.
+        (
+            OrgPolicyType::MasterPassword,
+            json!({
+                "minComplexity": 3,
+                "minLength": 12,
+                "requireUpper": false,
+                "requireLower": false,
+                "requireNumbers": false,
+                "requireSpecial": false,
+                "enforceOnLogin": false,
+            }),
+        ),
+    ]
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateClientData {
     name: String,
     billing_email: Option<String>,
-    /// The default collection's name, encrypted with the new org key.
+    /// The default collection's name, encrypted with the new org key. With the
+    /// Business preset, this is the "Everyone" collection.
     collection_name: String,
+    /// With the Business preset: the "Admins" collection's name, encrypted with
+    /// the new org key.
+    admins_collection_name: Option<String>,
+    /// "business" for the Business preset, or none.
+    preset: Option<String>,
     /// The new org key, encrypted for the caller.
     key: String,
     keys: ClientKeys,
@@ -254,6 +289,16 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
     require_admin(&msp_id, &headers.user.uuid, &conn).await?;
     let data = data.into_inner();
     let name = clean_name(&data.name)?;
+    let business = match data.preset.as_deref() {
+        None | Some("none") => false,
+        Some(BUSINESS_PRESET) => true,
+        Some(_) => err!("Preset must be business or none"),
+    };
+    let admins_collection = match (business, data.admins_collection_name) {
+        (true, Some(admins)) => Some(admins),
+        (true, None) => err!("The Business preset needs the Admins collection's name"),
+        (false, _) => None,
+    };
     let billing_email = data.billing_email.filter(|e| !e.trim().is_empty()).unwrap_or(headers.user.email.clone());
 
     let org =
@@ -268,7 +313,17 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
     org.save(&conn).await?;
     owner.save(&conn).await?;
     collection.save(&conn).await?;
-    MspClient::new(org.uuid.clone(), msp_id.clone()).insert(&conn).await?;
+    if let Some(admins) = admins_collection {
+        Collection::new(org.uuid.clone(), admins, None).save(&conn).await?;
+    }
+    if business {
+        for (policy_type, policy_data) in business_policies() {
+            OrgPolicy::new(org.uuid.clone(), policy_type, true, policy_data.to_string()).save(&conn).await?;
+        }
+    }
+    MspClient::new(org.uuid.clone(), msp_id.clone(), business.then(|| BUSINESS_PRESET.to_owned()))
+        .insert(&conn)
+        .await?;
     MspMembership::new(owner.uuid.clone(), msp_id.clone()).insert(&conn).await?;
 
     for staff in MspStaff::find_by_msp(&msp_id, &conn).await {

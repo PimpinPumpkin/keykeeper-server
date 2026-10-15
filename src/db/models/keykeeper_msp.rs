@@ -113,6 +113,8 @@ pub struct MspClient {
     pub org_uuid: OrganizationId,
     pub msp_uuid: MspId,
     pub created_at: NaiveDateTime,
+    /// The defaults the client started with, such as "business".
+    pub preset: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Insertable)]
@@ -230,11 +232,12 @@ impl MspStaff {
 }
 
 impl MspClient {
-    pub fn new(org_uuid: OrganizationId, msp_uuid: MspId) -> Self {
+    pub fn new(org_uuid: OrganizationId, msp_uuid: MspId, preset: Option<String>) -> Self {
         Self {
             org_uuid,
             msp_uuid,
             created_at: Utc::now().naive_utc(),
+            preset,
         }
     }
 

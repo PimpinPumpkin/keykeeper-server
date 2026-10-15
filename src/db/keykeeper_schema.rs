@@ -23,6 +23,7 @@ table! {
         org_uuid -> Text,
         msp_uuid -> Text,
         created_at -> Timestamp,
+        preset -> Nullable<Text>,
     }
 }
 
