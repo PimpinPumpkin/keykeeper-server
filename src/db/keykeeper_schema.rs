@@ -72,3 +72,10 @@ table! {
         created_at -> Timestamp,
     }
 }
+
+table! {
+    membership_permissions (membership_uuid) {
+        membership_uuid -> Text,
+        permissions -> Text,
+    }
+}

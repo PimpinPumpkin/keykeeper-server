@@ -900,7 +900,8 @@ async fn get_members(
         err!("Organization not found", "Organization id's do not match");
     }
 
-    if !headers.membership.has_full_access() {
+    // Keykeeper: or a custom role that manages members or account recovery.
+    if !headers.membership.has_full_access() && headers.custom_permissions.is_none() {
         err_code!("Resource not found.", "User does not have full access", Status::NotFound.code);
     }
 
@@ -1008,6 +1009,13 @@ async fn send_invite(
     } else {
         err!("Invalid type")
     };
+    // Keykeeper: a Custom role with our permissions is a regular member plus those permissions.
+    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions);
+    let new_type = if custom_role.is_some() {
+        MembershipType::User as i32
+    } else {
+        new_type
+    };
 
     if new_type != MembershipType::User && headers.membership_type != MembershipType::Owner {
         err!("Only Owners can invite Managers, Admins or Owners")
@@ -1021,6 +1029,13 @@ async fn send_invite(
             && data.permissions.get("editAnyCollection") == Some(&json!(true))
             && data.permissions.get("deleteAnyCollection") == Some(&json!(true))
             && data.permissions.get("createNewCollections") == Some(&json!(true)));
+    // Keykeeper: a custom role can only add regular members.
+    crate::db::models::keykeeper_roles::ensure_regular_grant(
+        headers.custom_permissions.as_ref(),
+        new_type,
+        custom_role.as_ref(),
+        access_all,
+    )?;
 
     let mut user_created: bool;
     for email in &data.emails {
@@ -1067,6 +1082,9 @@ async fn send_invite(
         new_member.atype = new_type;
         new_member.status = member_status;
         new_member.save(&conn).await?;
+        if custom_role.is_some() {
+            crate::db::models::keykeeper_roles::set(&new_member.uuid, custom_role.as_ref(), &conn).await?;
+        }
 
         if CONFIG.mail_enabled() {
             let org_name = if let Some(org) = Organization::find_by_uuid(&org_id, &conn).await {
@@ -1381,6 +1399,14 @@ async fn confirm_invite_impl(
     let Some(mut member_to_confirm) = Membership::find_by_uuid_and_org(member_id, org_id, conn).await else {
         err!("The specified user isn't a member of the organization")
     };
+    // Keykeeper: a custom role only confirms regular members.
+    crate::db::models::keykeeper_roles::ensure_regular_target(
+        headers.custom_permissions.as_ref(),
+        &headers.user.uuid,
+        &member_to_confirm,
+        conn,
+    )
+    .await?;
 
     if member_to_confirm.atype != MembershipType::User && headers.membership_type != MembershipType::Owner {
         err!("Only Owners can confirm Managers, Admins or Owners")
@@ -1512,6 +1538,13 @@ async fn edit_member(
     let Some(new_type) = MembershipType::from_str(raw_type) else {
         err!("Invalid type")
     };
+    // Keykeeper: a Custom role with our permissions is a regular member plus those permissions.
+    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions);
+    let new_type = if custom_role.is_some() {
+        MembershipType::User
+    } else {
+        new_type
+    };
 
     // HACK: This converts the Custom role which has the `Manage all collections` box checked into an access_all flag
     // Since the parent checkbox is not sent to the server we need to check and verify the child checkboxes
@@ -1525,6 +1558,20 @@ async fn edit_member(
     let Some(mut member_to_edit) = Membership::find_by_uuid_and_org(&member_id, &org_id, &conn).await else {
         err!("The specified user isn't member of the organization")
     };
+    // Keykeeper: a custom role only edits regular members, and only into regular members.
+    crate::db::models::keykeeper_roles::ensure_regular_target(
+        headers.custom_permissions.as_ref(),
+        &headers.user.uuid,
+        &member_to_edit,
+        &conn,
+    )
+    .await?;
+    crate::db::models::keykeeper_roles::ensure_regular_grant(
+        headers.custom_permissions.as_ref(),
+        new_type as i32,
+        custom_role.as_ref(),
+        access_all,
+    )?;
 
     if new_type != member_to_edit.atype
         && (member_to_edit.atype >= MembershipType::Admin || new_type >= MembershipType::Admin)
@@ -1600,6 +1647,8 @@ async fn edit_member(
     )
     .await;
 
+    // Keykeeper: keep the custom role in step with the edit.
+    crate::db::models::keykeeper_roles::set(&member_to_edit.uuid, custom_role.as_ref(), &conn).await?;
     member_to_edit.save(&conn).await
 }
 
@@ -1663,6 +1712,14 @@ async fn delete_member_impl(
     let Some(member_to_delete) = Membership::find_by_uuid_and_org(member_id, org_id, conn).await else {
         err!("User to delete isn't member of the organization")
     };
+    // Keykeeper: a custom role only removes regular members.
+    crate::db::models::keykeeper_roles::ensure_regular_target(
+        headers.custom_permissions.as_ref(),
+        &headers.user.uuid,
+        &member_to_delete,
+        conn,
+    )
+    .await?;
 
     if member_to_delete.atype != MembershipType::User && headers.membership_type != MembershipType::Owner {
         err!("Only Owners can delete Admins or Owners")
@@ -2268,6 +2325,14 @@ async fn revoke_member_impl(
             if member.user_uuid == headers.user.uuid {
                 err!("You cannot revoke yourself")
             }
+            // Keykeeper: a custom role only revokes regular members.
+            crate::db::models::keykeeper_roles::ensure_regular_target(
+                headers.custom_permissions.as_ref(),
+                &headers.user.uuid,
+                &member,
+                conn,
+            )
+            .await?;
             if member.atype == MembershipType::Owner && headers.membership_type != MembershipType::Owner {
                 err!("Only owners can revoke other owners")
             }
@@ -2368,6 +2433,14 @@ async fn restore_member_impl(
             if member.user_uuid == headers.user.uuid {
                 err!("You cannot restore yourself")
             }
+            // Keykeeper: a custom role only restores regular members.
+            crate::db::models::keykeeper_roles::ensure_regular_target(
+                headers.custom_permissions.as_ref(),
+                &headers.user.uuid,
+                &member,
+                conn,
+            )
+            .await?;
             if member.atype == MembershipType::Owner && headers.membership_type != MembershipType::Owner {
                 err!("Only owners can restore other owners")
             }
@@ -2952,6 +3025,14 @@ async fn check_reset_password_applicable_and_permissions(
     if super::keykeeper_msp::is_msp_membership(member_id, conn).await {
         err!("MSP staff can't be recovered by a client organization")
     }
+    // Keykeeper: a custom role only recovers regular members.
+    crate::db::models::keykeeper_roles::ensure_regular_target(
+        headers.custom_permissions.as_ref(),
+        &headers.user.uuid,
+        &target_user,
+        conn,
+    )
+    .await?;
 
     // Resetting user must be higher/equal to user to reset
     match headers.membership_type {

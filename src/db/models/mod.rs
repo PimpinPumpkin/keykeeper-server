@@ -11,6 +11,7 @@ mod folder;
 mod group;
 // Keykeeper
 mod keykeeper_msp;
+pub mod keykeeper_roles;
 mod org_policy;
 mod organization;
 mod send;

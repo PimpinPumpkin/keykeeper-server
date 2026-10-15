@@ -460,6 +460,9 @@ impl Membership {
                 "manageResetPassword": false,
                 "manageScim": false // Not supported (Not AGPLv3 Licensed)
         });
+        // Keykeeper: custom roles with real permissions.
+        let (membership_type, permissions) =
+            super::keykeeper_roles::client_type_and_permissions(self, membership_type, permissions, conn).await;
 
         // https://github.com/bitwarden/server/blob/9ebe16587175b1c0e9208f84397bb75d0d595510/src/Api/AdminConsole/Models/Response/ProfileOrganizationResponseModel.cs
         json!({
@@ -612,6 +615,9 @@ impl Membership {
         } else {
             json!(null)
         };
+        // Keykeeper: custom roles with real permissions.
+        let (membership_type, permissions) =
+            super::keykeeper_roles::client_type_and_permissions(self, membership_type, permissions, conn).await;
 
         json!({
             "id": self.uuid,
@@ -699,10 +705,14 @@ impl Membership {
             self.status
         };
 
+        // Keykeeper: custom roles show as Custom.
+        let (membership_type, _) =
+            super::keykeeper_roles::client_type_and_permissions(self, self.type_manager_as_custom(), Value::Null, conn)
+                .await;
         json!({
             "id": self.uuid,
             "userId": self.user_uuid,
-            "type": self.type_manager_as_custom(), // HACK: Convert the manager type to a custom type
+            "type": membership_type,
             "status": status,
             "name": user.name,
             "email": user.email,

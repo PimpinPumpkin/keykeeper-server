@@ -835,6 +835,9 @@ pub struct AdminHeaders {
     pub membership_type: MembershipType,
     pub ip: ClientIp,
     pub org_id: OrganizationId,
+    /// Keykeeper: set when a custom role, not an owner or admin, was admitted.
+    /// It acts as an admin, but only on regular members.
+    pub custom_permissions: Option<crate::db::models::keykeeper_roles::CustomPermissions>,
 }
 
 impl AdminHeaders {
@@ -857,6 +860,20 @@ impl<'r> FromRequest<'r> for AdminHeaders {
                 membership_type: headers.membership_type,
                 ip: headers.ip,
                 org_id: headers.membership.org_uuid,
+                custom_permissions: None,
+            })
+        } else if headers.membership_status == MembershipStatus::Confirmed
+            && let Some(role) = crate::db::models::keykeeper_roles::admitted(request, &headers.membership).await
+        {
+            // Keykeeper: a custom role whose permissions cover this endpoint.
+            Outcome::Success(Self {
+                host: headers.host,
+                device: headers.device,
+                user: headers.user,
+                membership_type: MembershipType::Admin,
+                ip: headers.ip,
+                org_id: headers.membership.org_uuid,
+                custom_permissions: Some(role),
             })
         } else {
             err_handler!("You need to be Admin or Owner to call this endpoint")
@@ -940,6 +957,8 @@ impl From<ManagerHeaders> for Headers {
 /// The ManagerHeadersLoose is used when you at least need to be a Manager,
 /// but there is no collection_id sent with the request (either in the path or as form data).
 pub struct ManagerHeadersLoose {
+    /// Keykeeper: set when a custom role was admitted (see AdminHeaders).
+    pub custom_permissions: Option<crate::db::models::keykeeper_roles::CustomPermissions>,
     pub host: String,
     pub device: Device,
     pub user: User,
@@ -955,6 +974,19 @@ impl<'r> FromRequest<'r> for ManagerHeadersLoose {
         let headers = try_outcome!(OrgHeaders::from_request(request).await);
         if headers.is_confirmed_and_manager() {
             Outcome::Success(Self {
+                custom_permissions: None,
+                host: headers.host,
+                device: headers.device,
+                user: headers.user,
+                membership: headers.membership,
+                ip: headers.ip,
+            })
+        } else if headers.membership_status == MembershipStatus::Confirmed
+            && let Some(role) = crate::db::models::keykeeper_roles::admitted(request, &headers.membership).await
+        {
+            // Keykeeper: a custom role whose permissions cover this endpoint.
+            Outcome::Success(Self {
+                custom_permissions: Some(role),
                 host: headers.host,
                 device: headers.device,
                 user: headers.user,
