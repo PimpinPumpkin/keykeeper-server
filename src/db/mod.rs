@@ -394,6 +394,8 @@ macro_rules! impl_FromToSqlText {
 }
 
 pub mod schema;
+// Keykeeper: our own tables.
+pub mod keykeeper_schema;
 
 // Reexport the models, needs to be after the macros are defined so it can access them
 pub mod models;

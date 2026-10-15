@@ -9,6 +9,8 @@ mod event;
 mod favorite;
 mod folder;
 mod group;
+// Keykeeper
+mod keykeeper_msp;
 mod org_policy;
 mod organization;
 mod send;
@@ -29,6 +31,7 @@ pub use self::event::{Event, EventType};
 pub use self::favorite::Favorite;
 pub use self::folder::{Folder, FolderCipher, FolderId};
 pub use self::group::{CollectionGroup, Group, GroupId, GroupUser};
+pub use self::keykeeper_msp::{Msp, MspClient, MspId, MspMembership, MspRole, MspStaff};
 pub use self::org_policy::{OrgPolicy, OrgPolicyId, OrgPolicyType};
 pub use self::organization::{
     Membership, MembershipId, MembershipStatus, MembershipType, OrgApiKeyId, Organization, OrganizationApiKey,
