@@ -30,6 +30,7 @@ table! {
         enrollment_token -> Nullable<Text>,
         enrollment_token_created_at -> Nullable<Timestamp>,
         everyone_collection -> Nullable<Text>,
+        templates_collection -> Nullable<Text>,
     }
 }
 
@@ -98,5 +99,32 @@ table! {
         atype -> Integer,
         enabled -> Bool,
         data -> Text,
+    }
+}
+
+table! {
+    msp_templates (msp_uuid, template_id) {
+        msp_uuid -> Text,
+        template_id -> Text,
+        source_cipher_uuid -> Text,
+        all_clients -> Bool,
+        created_at -> Timestamp,
+    }
+}
+
+table! {
+    msp_template_clients (msp_uuid, template_id, org_uuid) {
+        msp_uuid -> Text,
+        template_id -> Text,
+        org_uuid -> Text,
+    }
+}
+
+table! {
+    msp_template_copies (org_uuid, template_id) {
+        org_uuid -> Text,
+        template_id -> Text,
+        cipher_uuid -> Text,
+        source_revision -> Text,
     }
 }
