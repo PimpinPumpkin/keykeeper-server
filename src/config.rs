@@ -630,7 +630,7 @@ make_config! {
         /// Org creation users |> Allow org creation only by this list of comma-separated user emails.
         /// Blank or 'all' means all users can create orgs; 'none' means no users can create orgs.
         org_creation_users:     String, true,   def,    String::new();
-        /// Allow creating MSPs |> Keykeeper: whether users can create an MSP, which manages client organizations. Off by default on self-hosted servers.
+        /// Allow creating MSPs |> PassBundle: whether users can create an MSP, which manages client organizations. Off by default on self-hosted servers.
         msp_signups_allowed:    bool,   true,   def,    false;
         /// Allow invitations |> Controls whether users can be invited by organization admins, even when signups are otherwise disabled
         invitations_allowed:    bool,   true,   def,    true;
