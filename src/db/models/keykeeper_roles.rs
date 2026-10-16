@@ -25,7 +25,7 @@ use rocket::{
 use serde_json::Value;
 
 use crate::{
-    api::EmptyResult,
+    api::{ApiResult, EmptyResult},
     db::{DbConn, keykeeper_schema::membership_permissions},
     error::MapResult,
 };
@@ -73,6 +73,9 @@ impl Permission {
 }
 
 use Permission::{AccessEventLogs, AccessImportExport, ManagePolicies, ManageResetPassword, ManageUsers};
+
+/// Upstream's "Manage all collections" permissions, which custom roles can't have.
+const COLLECTION_PERMISSIONS: [&str; 3] = ["createNewCollections", "editAnyCollection", "deleteAnyCollection"];
 
 /// The endpoints a custom role can reach, and the permissions that each
 /// accepts (any one of them). Every other admin endpoint needs an owner or
@@ -155,9 +158,15 @@ impl CustomPermissions {
     /// The custom role an invite or edit asks for: upstream's Custom type ("4")
     /// with at least one of our permissions. Otherwise None, and upstream's own
     /// handling of Custom applies.
-    pub fn from_request(raw_type: &str, permissions: &HashMap<String, Value>) -> Option<Self> {
+    ///
+    /// A custom role can't also manage collections. We don't enforce those
+    /// permissions for custom roles yet, so the admin console's collection
+    /// tools would refuse them, and the web vault signs out on those refusals.
+    /// Upstream's Custom with only the collection permissions (a Manager)
+    /// still works.
+    pub fn from_request(raw_type: &str, permissions: &HashMap<String, Value>) -> ApiResult<Option<Self>> {
         if raw_type != "4" && raw_type != "Custom" {
-            return None;
+            return Ok(None);
         }
         let granted = |p: Permission| permissions.get(p.key()) == Some(&Value::Bool(true));
         let role = Self {
@@ -167,18 +176,30 @@ impl CustomPermissions {
             access_event_logs: granted(AccessEventLogs),
             access_import_export: granted(AccessImportExport),
         };
-        role.any().then_some(role)
+        if !role.any() {
+            return Ok(None);
+        }
+        if COLLECTION_PERMISSIONS.iter().any(|p| permissions.get(*p) == Some(&Value::Bool(true))) {
+            err!(
+                "Custom roles can't also manage all collections yet. Give them access to the collections they need, or make them an admin."
+            )
+        }
+        Ok(Some(role))
     }
 
-    /// Upstream's full permissions object, as clients expect it.
-    pub fn to_client_json(&self, all_collections: bool) -> Value {
+    /// Upstream's full permissions object, as clients expect it. It never
+    /// shows a custom role as managing collections, even with access to all
+    /// items (an MSP technician's vault access): the admin console's collection
+    /// tools need permissions custom roles don't have, and its refusals would
+    /// sign them out. They see and edit those items in their own vault.
+    pub fn to_client_json(&self) -> Value {
         json!({
             "accessEventLogs": self.access_event_logs,
             "accessImportExport": self.access_import_export,
             "accessReports": false,
-            "createNewCollections": all_collections,
-            "editAnyCollection": all_collections,
-            "deleteAnyCollection": all_collections,
+            "createNewCollections": false,
+            "editAnyCollection": false,
+            "deleteAnyCollection": false,
             "manageGroups": false,
             "managePolicies": self.manage_policies,
             "manageSso": false,
@@ -310,11 +331,6 @@ pub fn ensure_regular_grant(
 
 /// What clients see for a membership: Custom (4) with the role's permissions,
 /// or whatever upstream decided.
-///
-/// An MSP technician's vault access (access to all items) doesn't show as
-/// managing all collections: they see and edit every item in their own vault,
-/// while the admin console's collection tools need permissions custom roles
-/// don't enforce yet, and its refusals would sign them out.
 pub async fn client_type_and_permissions(
     member: &Membership,
     upstream_type: i32,
@@ -322,11 +338,7 @@ pub async fn client_type_and_permissions(
     conn: &DbConn,
 ) -> (i32, Value) {
     match find(&member.uuid, conn).await {
-        Some(role) => {
-            let manages_collections =
-                member.access_all && super::MspMembership::find_by_membership(&member.uuid, conn).await.is_none();
-            (4, role.to_client_json(manages_collections))
-        }
+        Some(role) => (4, role.to_client_json()),
         None => (upstream_type, upstream_permissions),
     }
 }
@@ -370,17 +382,44 @@ mod tests {
         let perms = |pairs: &[(&str, bool)]| -> HashMap<String, Value> {
             pairs.iter().map(|(k, v)| ((*k).to_owned(), Value::Bool(*v))).collect()
         };
-        assert_eq!(CustomPermissions::from_request("2", &perms(&[("manageUsers", true)])), None);
-        assert_eq!(CustomPermissions::from_request("4", &perms(&[("editAnyCollection", true)])), None);
-        assert_eq!(CustomPermissions::from_request("4", &perms(&[("manageUsers", false)])), None);
+        assert_eq!(CustomPermissions::from_request("2", &perms(&[("manageUsers", true)])).ok(), Some(None));
+        assert_eq!(CustomPermissions::from_request("4", &perms(&[("editAnyCollection", true)])).ok(), Some(None));
+        assert_eq!(CustomPermissions::from_request("4", &perms(&[("manageUsers", false)])).ok(), Some(None));
         let role = CustomPermissions::from_request("4", &perms(&[("manageUsers", true), ("managePolicies", true)]));
         assert_eq!(
-            role,
-            Some(CustomPermissions {
+            role.ok(),
+            Some(Some(CustomPermissions {
                 manage_users: true,
                 manage_policies: true,
                 ..Default::default()
-            })
+            }))
         );
+    }
+
+    #[test]
+    fn a_custom_role_cant_also_manage_collections() {
+        let perms = |pairs: &[(&str, bool)]| -> HashMap<String, Value> {
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), Value::Bool(*v))).collect()
+        };
+        for collection_permission in COLLECTION_PERMISSIONS {
+            let asked = perms(&[("manageUsers", true), (collection_permission, true)]);
+            assert!(CustomPermissions::from_request("4", &asked).is_err(), "{collection_permission}");
+        }
+        // Upstream's Custom with only the collection permissions is still upstream's.
+        let all_collections =
+            perms(&[("createNewCollections", true), ("editAnyCollection", true), ("deleteAnyCollection", true)]);
+        assert_eq!(CustomPermissions::from_request("4", &all_collections).ok(), Some(None));
+        // Unchecked boxes are fine.
+        let unchecked = perms(&[("manageUsers", true), ("editAnyCollection", false)]);
+        assert!(CustomPermissions::from_request("4", &unchecked).is_ok_and(|role| role.is_some()));
+
+        let shown = CustomPermissions {
+            manage_users: true,
+            ..Default::default()
+        }
+        .to_client_json();
+        for collection_permission in COLLECTION_PERMISSIONS {
+            assert_eq!(shown[collection_permission], Value::Bool(false), "{collection_permission}");
+        }
     }
 }

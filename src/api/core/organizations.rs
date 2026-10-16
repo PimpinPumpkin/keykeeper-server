@@ -1012,7 +1012,7 @@ async fn send_invite(
         err!("Invalid type")
     };
     // Keykeeper: a Custom role with our permissions is a regular member plus those permissions.
-    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions);
+    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions)?;
     let new_type = if custom_role.is_some() {
         MembershipType::User as i32
     } else {
@@ -1541,7 +1541,7 @@ async fn edit_member(
         err!("Invalid type")
     };
     // Keykeeper: a Custom role with our permissions is a regular member plus those permissions.
-    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions);
+    let custom_role = crate::db::models::keykeeper_roles::CustomPermissions::from_request(raw_type, &data.permissions)?;
     let new_type = if custom_role.is_some() {
         MembershipType::User
     } else {
