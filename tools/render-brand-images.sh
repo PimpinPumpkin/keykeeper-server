@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../src/static/images"
 NAME="PassBundle"
 COLOR="#1F6F5C"
-MARK="M3 0h20a3 3 0 0 1 3 3v26a3 3 0 0 1-3 3H3a3 3 0 0 1-3-3V3a3 3 0 0 1 3-3Zm10 7a5 5 0 0 0-2.5 9.33L9 26h8l-1.5-9.67A5 5 0 0 0 13 7Z"
+MARK="M4.5 13V8.5a8.5 8.5 0 0 1 17 0V13h-4V8.5a4.5 4.5 0 0 0-9 0V13ZM4.5 13h17a4.5 4.5 0 0 1 4.5 4.5V18H0v-.5A4.5 4.5 0 0 1 4.5 13ZM0 20h26v5H0ZM0 27h26v.5a4.5 4.5 0 0 1-4.5 4.5h-17A4.5 4.5 0 0 1 0 27.5Z"
 FONT="Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
 
 square() { # fill size out
