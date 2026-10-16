@@ -16,8 +16,8 @@ use crate::{
     db::{
         DbConn, DbPool,
         models::{
-            Device, DeviceType, EventType, Membership, MembershipType, OrgPolicyType, Organization, OrganizationId,
-            TwoFactor, TwoFactorIncomplete, TwoFactorType, User, UserId,
+            Device, DeviceType, EventType, Membership, OrgPolicyType, Organization, OrganizationId, TwoFactor,
+            TwoFactorIncomplete, TwoFactorType, User, UserId, exempt_from_member_policies,
         },
     },
     mail,
@@ -170,7 +170,8 @@ pub async fn enforce_2fa_policy(
 ) -> EmptyResult {
     for member in Membership::find_by_user_and_policy(&user.uuid, OrgPolicyType::TwoFactorAuthentication, conn).await {
         // Policy only applies to non-Owner/non-Admin members who have accepted joining the org
-        if member.atype < MembershipType::Admin {
+        // Keykeeper: and not to MSP staff.
+        if !exempt_from_member_policies(&member, conn).await {
             if CONFIG.mail_enabled() {
                 let org = Organization::find_by_uuid(&member.org_uuid, conn).await.unwrap();
                 mail::send_2fa_removed_from_org(&user.email, &org.name).await?;
@@ -205,7 +206,10 @@ pub async fn enforce_2fa_policy_for_org(
     let org = Organization::find_by_uuid(org_id, conn).await.unwrap();
     for member in Membership::find_confirmed_by_org(org_id, conn).await {
         // Don't enforce the policy for Admins and Owners.
-        if member.atype < MembershipType::Admin && TwoFactor::find_by_user(&member.user_uuid, conn).await.is_empty() {
+        // Keykeeper: or MSP staff.
+        if !exempt_from_member_policies(&member, conn).await
+            && TwoFactor::find_by_user(&member.user_uuid, conn).await.is_empty()
+        {
             if CONFIG.mail_enabled() {
                 let user = User::find_by_uuid(&member.user_uuid, conn).await.unwrap();
                 mail::send_2fa_removed_from_org(&user.email, &org.name).await?;

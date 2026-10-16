@@ -18,7 +18,7 @@ use crate::{
             Cipher, CipherId, Collection, CollectionCipher, CollectionGroup, CollectionId, CollectionUser, Device,
             EventType, Group, GroupId, GroupUser, Invitation, Membership, MembershipId, MembershipStatus,
             MembershipType, OrgPolicy, OrgPolicyType, Organization, OrganizationApiKey, OrganizationId, TwoFactor,
-            TwoFactorType, User, UserId,
+            TwoFactorType, User, UserId, exempt_from_member_policies,
         },
     },
     mail,
@@ -2158,7 +2158,8 @@ async fn put_policy(
             // Policy only applies to non-Owner/non-Admin members who have accepted joining the org
             // Exclude invited and revoked users when checking for this policy.
             // Those users will not be allowed to accept or be activated because of the policy checks done there.
-            if member.atype < MembershipType::Admin
+            // Keykeeper: and not to MSP staff.
+            if !exempt_from_member_policies(&member, &conn).await
                 && member.status != MembershipStatus::Invited as i32
                 && Membership::count_accepted_and_confirmed_by_user(&member.user_uuid, &member.org_uuid, &conn).await
                     > 0

@@ -29,7 +29,9 @@ use crate::{
 };
 use macros::UuidFromParam;
 
-use super::{CollectionId, MembershipId, MembershipType, OrganizationId, UserId, keykeeper_roles::CustomPermissions};
+use super::{
+    CollectionId, Membership, MembershipId, MembershipType, OrganizationId, UserId, keykeeper_roles::CustomPermissions,
+};
 
 // Our migrations exist for SQLite and PostgreSQL only.
 #[cfg(feature = "mysql")]
@@ -510,6 +512,16 @@ impl MspClient {
         })
         .await
     }
+}
+
+/// Whether a client's member policies skip this membership: two-step login,
+/// single organization, and the others upstream applies only below admin.
+/// Upstream exempts owners and admins. An MSP's staff are exempt too, whatever
+/// their role in the client, since they work in every client and a technician
+/// with a custom role is a regular member there. See DESIGN.md, "How an MSP
+/// reaches its clients".
+pub async fn exempt_from_member_policies(member: &Membership, conn: &DbConn) -> bool {
+    member.atype >= MembershipType::Admin || MspMembership::find_by_membership(&member.uuid, conn).await.is_some()
 }
 
 impl MspMembership {

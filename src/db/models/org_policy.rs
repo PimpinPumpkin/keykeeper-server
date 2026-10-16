@@ -13,7 +13,9 @@ use crate::{
     error::MapResult,
 };
 
-use super::{Membership, MembershipId, MembershipStatus, MembershipType, OrganizationId, TwoFactor, UserId};
+use super::{
+    Membership, MembershipId, MembershipStatus, OrganizationId, TwoFactor, UserId, exempt_from_member_policies,
+};
 
 #[derive(Identifiable, Queryable, Insertable, AsChangeset)]
 #[diesel(table_name = org_policies)]
@@ -293,8 +295,9 @@ impl OrgPolicy {
                 continue;
             }
 
+            // Keykeeper: owners, admins, and MSP staff are exempt.
             if let Some(user) = Membership::find_confirmed_by_user_and_org(user_uuid, &policy.org_uuid, conn).await
-                && user.atype < MembershipType::Admin
+                && !exempt_from_member_policies(&user, conn).await
             {
                 return true;
             }
@@ -303,7 +306,8 @@ impl OrgPolicy {
     }
 
     pub async fn check_user_allowed(m: &Membership, action: &str, conn: &DbConn) -> EmptyResult {
-        if m.atype < MembershipType::Admin && m.status > (MembershipStatus::Invited as i32) {
+        // Keykeeper: owners, admins, and MSP staff are exempt.
+        if m.status > (MembershipStatus::Invited as i32) && !exempt_from_member_policies(m, conn).await {
             // Enforce TwoFactor/TwoStep login
             if let Some(p) = Self::find_by_org_and_type(&m.org_uuid, OrgPolicyType::TwoFactorAuthentication, conn).await
                 && p.enabled
@@ -365,8 +369,9 @@ impl OrgPolicy {
         for policy in
             OrgPolicy::find_confirmed_by_user_and_active_policy(user_uuid, OrgPolicyType::SendOptions, conn).await
         {
+            // Keykeeper: owners, admins, and MSP staff are exempt.
             if let Some(user) = Membership::find_confirmed_by_user_and_org(user_uuid, &policy.org_uuid, conn).await
-                && user.atype < MembershipType::Admin
+                && !exempt_from_member_policies(&user, conn).await
             {
                 match serde_json::from_str::<SendOptionsPolicyData>(&policy.data) {
                     Ok(opts) => {
