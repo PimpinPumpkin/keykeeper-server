@@ -22,7 +22,7 @@ use crate::{
         DbConn,
         keykeeper_schema::{
             msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_policies, msp_staff,
-            msp_staff_clients, msps,
+            msp_staff_clients, msp_template_clients, msp_template_copies, msp_templates, msps,
         },
     },
     error::MapResult,
@@ -30,7 +30,8 @@ use crate::{
 use macros::UuidFromParam;
 
 use super::{
-    CollectionId, Membership, MembershipId, MembershipType, OrganizationId, UserId, keykeeper_roles::CustomPermissions,
+    CipherId, CollectionId, Membership, MembershipId, MembershipType, OrganizationId, UserId,
+    keykeeper_roles::CustomPermissions,
 };
 
 // Our migrations exist for SQLite and PostgreSQL only.
@@ -187,6 +188,8 @@ pub struct MspClient {
     pub enrollment_token_created_at: Option<NaiveDateTime>,
     /// The collection people who join get, such as "Everyone".
     pub everyone_collection: Option<CollectionId>,
+    /// Where the MSP's templates go in this client. See DESIGN.md, "MSP templates".
+    pub templates_collection: Option<CollectionId>,
 }
 
 /// Someone who joined a client through its enrollment token, and when.
@@ -434,6 +437,7 @@ impl MspClient {
             enrollment_token: Some(Self::new_enrollment_token()),
             enrollment_token_created_at: Some(Utc::now().naive_utc()),
             everyone_collection,
+            templates_collection: None,
         }
     }
 
@@ -490,6 +494,14 @@ impl MspClient {
             .execute(conn)
             .map(|_| ())
             .map_res("Error removing MSP client")?;
+            diesel::delete(
+                msp_template_clients::table
+                    .filter(msp_template_clients::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_template_clients::org_uuid.eq(&self.org_uuid)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error removing MSP client")?;
             diesel::delete(msp_clients::table.filter(msp_clients::org_uuid.eq(self.org_uuid)))
                 .execute(conn)
                 .map_res("Error removing MSP client")
@@ -500,6 +512,22 @@ impl MspClient {
     pub async fn find_by_org(org_uuid: &OrganizationId, conn: &DbConn) -> Option<Self> {
         conn.run(move |conn| msp_clients::table.filter(msp_clients::org_uuid.eq(org_uuid)).first::<Self>(conn).ok())
             .await
+    }
+
+    pub async fn set_templates_collection(&mut self, collection: CollectionId, conn: &DbConn) -> EmptyResult {
+        let org = self.org_uuid.clone();
+        let saved = collection.clone();
+        let updated: EmptyResult = conn
+            .run(move |conn| {
+                diesel::update(msp_clients::table.filter(msp_clients::org_uuid.eq(org)))
+                    .set(msp_clients::templates_collection.eq(saved))
+                    .execute(conn)
+                    .map_res("Error saving the Templates collection")
+            })
+            .await;
+        updated?;
+        self.templates_collection = Some(collection);
+        Ok(())
     }
 
     pub async fn find_by_msp(msp_uuid: &MspId, conn: &DbConn) -> Vec<Self> {
@@ -807,6 +835,187 @@ impl MspPolicy {
             msp_policies::table
                 .filter(msp_policies::msp_uuid.eq(msp_uuid))
                 .order(msp_policies::atype.asc())
+                .load::<Self>(conn)
+                .unwrap_or_default()
+        })
+        .await
+    }
+}
+
+/// An item template an MSP sends to its clients: which item is the source,
+/// and whether every client gets it or only those in msp_template_clients.
+/// The server never sees what's in it. See DESIGN.md, "MSP templates".
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_templates)]
+#[diesel(primary_key(msp_uuid, template_id))]
+pub struct MspTemplate {
+    pub msp_uuid: MspId,
+    pub template_id: String,
+    pub source_cipher_uuid: CipherId,
+    pub all_clients: bool,
+    pub created_at: NaiveDateTime,
+}
+
+/// A client's copy of an MSP template, and the version of the source (its
+/// revision date) it was made from.
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_template_copies)]
+#[diesel(primary_key(org_uuid, template_id))]
+pub struct MspTemplateCopy {
+    pub org_uuid: OrganizationId,
+    pub template_id: String,
+    pub cipher_uuid: CipherId,
+    pub source_revision: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = msp_template_clients)]
+struct MspTemplateClient {
+    msp_uuid: MspId,
+    template_id: String,
+    org_uuid: OrganizationId,
+}
+
+impl MspTemplate {
+    /// Saves the template and, unless it's for every client, the clients it's
+    /// for, replacing what was saved before.
+    pub async fn save(&self, clients: &[OrganizationId], conn: &DbConn) -> EmptyResult {
+        let chosen: Vec<MspTemplateClient> = if self.all_clients {
+            Vec::new()
+        } else {
+            clients
+                .iter()
+                .map(|org| MspTemplateClient {
+                    msp_uuid: self.msp_uuid.clone(),
+                    template_id: self.template_id.clone(),
+                    org_uuid: org.clone(),
+                })
+                .collect()
+        };
+        conn.run(move |conn| {
+            diesel::delete(
+                msp_template_clients::table
+                    .filter(msp_template_clients::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_template_clients::template_id.eq(&self.template_id)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error saving a template")?;
+            diesel::delete(
+                msp_templates::table
+                    .filter(msp_templates::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_templates::template_id.eq(&self.template_id)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error saving a template")?;
+            diesel::insert_into(msp_templates::table)
+                .values(self)
+                .execute(conn)
+                .map(|_| ())
+                .map_res("Error saving a template")?;
+            for row in &chosen {
+                diesel::insert_into(msp_template_clients::table)
+                    .values(row)
+                    .execute(conn)
+                    .map(|_| ())
+                    .map_res("Error saving a template")?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Stops sending the template, and forgets its copies in the MSP's clients.
+    /// The copies themselves stay where they are.
+    pub async fn delete(self, clients: Vec<OrganizationId>, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::delete(
+                msp_template_copies::table
+                    .filter(msp_template_copies::template_id.eq(&self.template_id))
+                    .filter(msp_template_copies::org_uuid.eq_any(&clients)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error removing a template")?;
+            diesel::delete(
+                msp_template_clients::table
+                    .filter(msp_template_clients::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_template_clients::template_id.eq(&self.template_id)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error removing a template")?;
+            diesel::delete(
+                msp_templates::table
+                    .filter(msp_templates::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_templates::template_id.eq(&self.template_id)),
+            )
+            .execute(conn)
+            .map_res("Error removing a template")
+        })
+        .await
+    }
+
+    pub async fn find(msp_uuid: &MspId, template_id: &str, conn: &DbConn) -> Option<Self> {
+        conn.run(move |conn| {
+            msp_templates::table
+                .filter(msp_templates::msp_uuid.eq(msp_uuid))
+                .filter(msp_templates::template_id.eq(template_id))
+                .first::<Self>(conn)
+                .ok()
+        })
+        .await
+    }
+
+    pub async fn find_by_msp(msp_uuid: &MspId, conn: &DbConn) -> Vec<Self> {
+        conn.run(move |conn| {
+            msp_templates::table
+                .filter(msp_templates::msp_uuid.eq(msp_uuid))
+                .order(msp_templates::created_at.asc())
+                .load::<Self>(conn)
+                .unwrap_or_default()
+        })
+        .await
+    }
+
+    /// The clients a template for chosen clients goes to.
+    pub async fn chosen_clients(&self, conn: &DbConn) -> Vec<OrganizationId> {
+        conn.run(move |conn| {
+            msp_template_clients::table
+                .filter(msp_template_clients::msp_uuid.eq(&self.msp_uuid))
+                .filter(msp_template_clients::template_id.eq(&self.template_id))
+                .select(msp_template_clients::org_uuid)
+                .load::<OrganizationId>(conn)
+                .unwrap_or_default()
+        })
+        .await
+    }
+}
+
+impl MspTemplateCopy {
+    pub async fn save(&self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::delete(
+                msp_template_copies::table
+                    .filter(msp_template_copies::org_uuid.eq(&self.org_uuid))
+                    .filter(msp_template_copies::template_id.eq(&self.template_id)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error recording a template copy")?;
+            diesel::insert_into(msp_template_copies::table)
+                .values(self)
+                .execute(conn)
+                .map_res("Error recording a template copy")
+        })
+        .await
+    }
+
+    pub async fn find_by_org(org_uuid: &OrganizationId, conn: &DbConn) -> Vec<Self> {
+        conn.run(move |conn| {
+            msp_template_copies::table
+                .filter(msp_template_copies::org_uuid.eq(org_uuid))
                 .load::<Self>(conn)
                 .unwrap_or_default()
         })
