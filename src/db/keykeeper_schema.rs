@@ -91,3 +91,12 @@ table! {
         org_uuid -> Text,
     }
 }
+
+table! {
+    msp_policies (msp_uuid, atype) {
+        msp_uuid -> Text,
+        atype -> Integer,
+        enabled -> Bool,
+        data -> Text,
+    }
+}

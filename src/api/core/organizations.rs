@@ -8,7 +8,7 @@ use crate::{
     CONFIG,
     api::admin::FAKE_ADMIN_UUID,
     api::{
-        EmptyResult, JsonResult, Notify, PasswordOrOtpData, UpdateType,
+        ApiResult, EmptyResult, JsonResult, Notify, PasswordOrOtpData, UpdateType,
         core::{CipherSyncData, CipherSyncType, accept_org_invite, log_event, two_factor},
     },
     auth::{AdminHeaders, Headers, ManagerHeaders, ManagerHeadersLoose, OrgMemberHeaders, OwnerHeaders, decode_invite},
@@ -2076,10 +2076,11 @@ async fn get_policy(org_id: OrganizationId, pol_type: i32, headers: AdminHeaders
     Ok(Json(policy.to_json()))
 }
 
+// Keykeeper: visible to keykeeper_msp_policies, which builds one per default.
 #[derive(Deserialize)]
-struct PolicyData {
-    enabled: bool,
-    data: Option<Value>,
+pub(super) struct PolicyData {
+    pub enabled: bool,
+    pub data: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -2108,6 +2109,26 @@ async fn put_policy(
         err!("Invalid or unsupported policy type")
     };
 
+    // Keykeeper: the rest is set_policy, shared with MSP default policies so a
+    // default reaches each client with the same checks and side effects.
+    let policy =
+        set_policy(&org_id, pol_type_enum, data, &headers.user.uuid, headers.device.atype, &headers.ip.ip, &conn)
+            .await?;
+
+    Ok(Json(policy.to_json()))
+}
+
+/// Keykeeper: put_policy's body, unchanged except for its parameters. Also
+/// used to apply an MSP's default policies to its clients.
+pub(super) async fn set_policy(
+    org_id: &OrganizationId,
+    pol_type_enum: OrgPolicyType,
+    data: PolicyData,
+    act_user_id: &UserId,
+    device_type: i32,
+    ip: &std::net::IpAddr,
+    conn: &DbConn,
+) -> ApiResult<OrgPolicy> {
     // Bitwarden only allows the Reset Password policy when Single Org policy is enabled
     // Vaultwarden encouraged to use multiple orgs instead of groups because groups were not available in the past
     // Now that groups are available we can enforce this option when wanted.
@@ -2116,7 +2137,7 @@ async fn put_policy(
     if CONFIG.enforce_single_org_with_reset_pw_policy() {
         if pol_type_enum == OrgPolicyType::ResetPassword && data.enabled {
             let single_org_policy_enabled =
-                match OrgPolicy::find_by_org_and_type(&org_id, OrgPolicyType::SingleOrg, &conn).await {
+                match OrgPolicy::find_by_org_and_type(org_id, OrgPolicyType::SingleOrg, conn).await {
                     Some(p) => p.enabled,
                     None => false,
                 };
@@ -2129,7 +2150,7 @@ async fn put_policy(
         // Also prevent the Single Org Policy to be disabled if the Reset Password policy is enabled
         if pol_type_enum == OrgPolicyType::SingleOrg && !data.enabled {
             let reset_pw_policy_enabled =
-                match OrgPolicy::find_by_org_and_type(&org_id, OrgPolicyType::ResetPassword, &conn).await {
+                match OrgPolicy::find_by_org_and_type(org_id, OrgPolicyType::ResetPassword, conn).await {
                     Some(p) => p.enabled,
                     None => false,
                 };
@@ -2142,73 +2163,48 @@ async fn put_policy(
 
     // When enabling the TwoFactorAuthentication policy, revoke all members that do not have 2FA
     if pol_type_enum == OrgPolicyType::TwoFactorAuthentication && data.enabled {
-        two_factor::enforce_2fa_policy_for_org(
-            &org_id,
-            &headers.user.uuid,
-            headers.device.atype,
-            &headers.ip.ip,
-            &conn,
-        )
-        .await?;
+        two_factor::enforce_2fa_policy_for_org(org_id, act_user_id, device_type, ip, conn).await?;
     }
 
     // When enabling the SingleOrg policy, remove this org's members that are members of other orgs
     if pol_type_enum == OrgPolicyType::SingleOrg && data.enabled {
-        for mut member in Membership::find_by_org(&org_id, &conn).await {
+        for mut member in Membership::find_by_org(org_id, conn).await {
             // Policy only applies to non-Owner/non-Admin members who have accepted joining the org
             // Exclude invited and revoked users when checking for this policy.
             // Those users will not be allowed to accept or be activated because of the policy checks done there.
             // Keykeeper: and not to MSP staff.
-            if !exempt_from_member_policies(&member, &conn).await
+            if !exempt_from_member_policies(&member, conn).await
                 && member.status != MembershipStatus::Invited as i32
-                && Membership::count_accepted_and_confirmed_by_user(&member.user_uuid, &member.org_uuid, &conn).await
-                    > 0
+                && Membership::count_accepted_and_confirmed_by_user(&member.user_uuid, &member.org_uuid, conn).await > 0
             {
                 if CONFIG.mail_enabled() {
-                    let org = Organization::find_by_uuid(&member.org_uuid, &conn).await.unwrap();
-                    let user = User::find_by_uuid(&member.user_uuid, &conn).await.unwrap();
+                    let org = Organization::find_by_uuid(&member.org_uuid, conn).await.unwrap();
+                    let user = User::find_by_uuid(&member.user_uuid, conn).await.unwrap();
 
                     mail::send_single_org_removed_from_org(&user.email, &org.name).await?;
                 }
 
-                log_event(
-                    EventType::OrganizationUserRemoved,
-                    &member.uuid,
-                    &org_id,
-                    &headers.user.uuid,
-                    headers.device.atype,
-                    &headers.ip.ip,
-                    &conn,
-                )
-                .await;
+                log_event(EventType::OrganizationUserRemoved, &member.uuid, org_id, act_user_id, device_type, ip, conn)
+                    .await;
 
                 member.revoke();
-                member.save(&conn).await?;
+                member.save(conn).await?;
             }
         }
     }
 
-    let mut policy = match OrgPolicy::find_by_org_and_type(&org_id, pol_type_enum, &conn).await {
+    let mut policy = match OrgPolicy::find_by_org_and_type(org_id, pol_type_enum, conn).await {
         Some(p) => p,
         None => OrgPolicy::new(org_id.clone(), pol_type_enum, false, "{}".to_owned()),
     };
 
     policy.enabled = data.enabled;
     policy.data = serde_json::to_string(&data.data)?;
-    policy.save(&conn).await?;
+    policy.save(conn).await?;
 
-    log_event(
-        EventType::PolicyUpdated,
-        policy.uuid.as_ref(),
-        &org_id,
-        &headers.user.uuid,
-        headers.device.atype,
-        &headers.ip.ip,
-        &conn,
-    )
-    .await;
+    log_event(EventType::PolicyUpdated, policy.uuid.as_ref(), org_id, act_user_id, device_type, ip, conn).await;
 
-    Ok(Json(policy.to_json()))
+    Ok(policy)
 }
 
 #[get("/plans")]

@@ -21,8 +21,8 @@ use crate::{
     db::{
         DbConn,
         keykeeper_schema::{
-            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_staff, msp_staff_clients,
-            msps,
+            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_policies, msp_staff,
+            msp_staff_clients, msps,
         },
     },
     error::MapResult,
@@ -756,6 +756,57 @@ impl MspInvite {
             msp_invites::table
                 .filter(msp_invites::msp_uuid.eq(msp_uuid))
                 .order(msp_invites::created_at.asc())
+                .load::<Self>(conn)
+                .unwrap_or_default()
+        })
+        .await
+    }
+}
+
+/// One of an MSP's default policies: an upstream policy type, on or off, with
+/// its options as upstream stores them. A type without a row is off. See
+/// DESIGN.md, "Default policies".
+#[derive(Identifiable, Queryable, Insertable)]
+#[diesel(table_name = msp_policies)]
+#[diesel(primary_key(msp_uuid, atype))]
+pub struct MspPolicy {
+    pub msp_uuid: MspId,
+    pub atype: i32,
+    pub enabled: bool,
+    pub data: String,
+}
+
+impl MspPolicy {
+    pub fn new(msp_uuid: MspId, atype: i32, enabled: bool, data: String) -> Self {
+        Self {
+            msp_uuid,
+            atype,
+            enabled,
+            data,
+        }
+    }
+
+    /// Saves this default, replacing the MSP's earlier one for the same type.
+    pub async fn save(&self, conn: &DbConn) -> EmptyResult {
+        conn.run(move |conn| {
+            diesel::delete(
+                msp_policies::table
+                    .filter(msp_policies::msp_uuid.eq(&self.msp_uuid))
+                    .filter(msp_policies::atype.eq(self.atype)),
+            )
+            .execute(conn)
+            .map(|_| ())
+            .map_res("Error saving a default policy")?;
+            diesel::insert_into(msp_policies::table).values(self).execute(conn).map_res("Error saving a default policy")
+        })
+        .await
+    }
+
+    pub async fn find_by_msp(msp_uuid: &MspId, conn: &DbConn) -> Vec<Self> {
+        conn.run(move |conn| {
+            msp_policies::table
+                .filter(msp_policies::msp_uuid.eq(msp_uuid))
+                .order(msp_policies::atype.asc())
                 .load::<Self>(conn)
                 .unwrap_or_default()
         })

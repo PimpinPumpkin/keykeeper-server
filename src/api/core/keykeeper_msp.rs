@@ -20,14 +20,13 @@ use serde_json::Value;
 
 use crate::{
     CONFIG,
-    api::{EmptyResult, JsonResult},
+    api::{EmptyResult, JsonResult, core::keykeeper_msp_policies},
     auth::Headers,
     db::{
         DbConn,
         models::{
             Collection, Membership, MembershipId, MembershipStatus, MembershipType, Msp, MspClient, MspEvent, MspId,
-            MspInvite, MspMembership, MspRole, MspStaff, OrgPolicy, OrgPolicyType, Organization, OrganizationId,
-            TechnicianAccess, User, UserId,
+            MspInvite, MspMembership, MspRole, MspStaff, Organization, OrganizationId, TechnicianAccess, User, UserId,
             keykeeper_roles::{self, CustomPermissions, Permission},
         },
     },
@@ -345,6 +344,7 @@ async fn create_msp(headers: Headers, data: Json<CreateMspData>, conn: DbConn) -
     let msp = Msp::new(clean_name(&data.name)?);
     msp.insert(&conn).await?;
     MspStaff::new(msp.uuid.clone(), headers.user.uuid.clone(), MspRole::Admin).insert(&conn).await?;
+    keykeeper_msp_policies::seed_defaults(&msp.uuid, &conn).await?;
     Audit::by("msp_created", &headers).detail(msp.name.clone()).record(&msp.uuid, &conn).await?;
     Ok(Json(json!({ "id": msp.uuid, "name": msp.name, "role": MspRole::Admin.as_str() })))
 }
@@ -458,40 +458,9 @@ struct ClientKeys {
     public_key: String,
 }
 
-/// The Business preset: the defaults a business client starts with, so its
-/// admins never have to build policies to get them. Every one is an upstream
-/// policy the client's owners can change later in its admin console. See
-/// DESIGN.md, "Defaults (Business preset)".
+/// The preset a client started with: "business" is the MSP's default policies
+/// and the Everyone and Admins collections. See DESIGN.md, "Default policies".
 const BUSINESS_PRESET: &str = "business";
-
-fn business_policies() -> Vec<(OrgPolicyType, Value)> {
-    vec![
-        // Account recovery, with automatic enrollment: a member who forgets
-        // their master password can be let back in by an owner or admin.
-        (OrgPolicyType::ResetPassword, json!({ "autoEnrollEnabled": true })),
-        // Single organization: members can't also belong to another
-        // organization with the same account. Recovery opens a member's whole
-        // account, so without this a client's admins could recover their way
-        // into a member's family organization. Personal items go in a separate
-        // personal account. Upstream exempts owners and admins, so MSP staff
-        // still reach every client.
-        (OrgPolicyType::SingleOrg, Value::Null),
-        // A strong master password: at least 12 characters and a strength
-        // score of 3 out of 4. Existing passwords aren't forced to change.
-        (
-            OrgPolicyType::MasterPassword,
-            json!({
-                "minComplexity": 3,
-                "minLength": 12,
-                "requireUpper": false,
-                "requireLower": false,
-                "requireNumbers": false,
-                "requireSpecial": false,
-                "enforceOnLogin": false,
-            }),
-        ),
-    ]
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -546,9 +515,7 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
         Collection::new(org.uuid.clone(), admins, None).save(&conn).await?;
     }
     if business {
-        for (policy_type, policy_data) in business_policies() {
-            OrgPolicy::new(org.uuid.clone(), policy_type, true, policy_data.to_string()).save(&conn).await?;
-        }
+        keykeeper_msp_policies::apply_defaults_to_new_client(&msp_id, &org.uuid, &headers, &conn).await?;
     }
     MspClient::new(
         org.uuid.clone(),
@@ -573,7 +540,7 @@ async fn create_client(msp_id: MspId, headers: Headers, data: Json<CreateClientD
     Audit::by("client_created", &headers)
         .org(&org.uuid, &org.name)
         .detail(if business {
-            "Business defaults"
+            "Default policies"
         } else {
             "No defaults"
         })
@@ -1018,7 +985,8 @@ async fn list_events(
 }
 
 /// For a client's own owners and admins: which MSP manages the organization,
-/// and its staff there.
+/// its staff there, and the policies where the organization has its own
+/// setting rather than the MSP's default.
 #[get("/keykeeper/organizations/<org_id>/msp")]
 async fn get_organization_msp(org_id: OrganizationId, headers: Headers, conn: DbConn) -> JsonResult {
     let Some(caller) = Membership::find_confirmed_by_user_and_org(&headers.user.uuid, &org_id, &conn).await else {
@@ -1049,7 +1017,11 @@ async fn get_organization_msp(org_id: OrganizationId, headers: Headers, conn: Db
             }));
         }
     }
-    Ok(Json(json!({ "msp": { "id": msp.uuid, "name": msp.name }, "staff": staff })))
+    Ok(Json(json!({
+        "msp": { "id": msp.uuid, "name": msp.name },
+        "staff": staff,
+        "ownPolicies": keykeeper_msp_policies::own_policies(&msp.uuid, &org_id, &conn).await,
+    })))
 }
 
 /// For a client's own owners: removes the MSP and all of its staff from the
