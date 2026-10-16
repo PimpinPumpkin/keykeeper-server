@@ -34,6 +34,7 @@ pub use self::folder::{Folder, FolderCipher, FolderId};
 pub use self::group::{CollectionGroup, Group, GroupId, GroupUser};
 pub use self::keykeeper_msp::{
     Msp, MspClient, MspEnrollmentJoin, MspEvent, MspId, MspInvite, MspMembership, MspRole, MspStaff, TechnicianAccess,
+    exempt_from_member_policies,
 };
 pub use self::org_policy::{OrgPolicy, OrgPolicyId, OrgPolicyType};
 pub use self::organization::{
