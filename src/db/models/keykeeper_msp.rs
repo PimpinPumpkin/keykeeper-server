@@ -36,7 +36,7 @@ use super::{
 
 // Our migrations exist for SQLite and PostgreSQL only.
 #[cfg(feature = "mysql")]
-compile_error!("Keykeeper supports SQLite and PostgreSQL only. See DESIGN.md, \"MSP console\".");
+compile_error!("PassBundle supports SQLite and PostgreSQL only. See DESIGN.md, \"MSP console\".");
 
 #[derive(
     Clone,

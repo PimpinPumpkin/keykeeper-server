@@ -240,9 +240,9 @@ fn config() -> Json<Value> {
         "version": "2026.6.0",
         "gitHash": option_env!("GIT_REV"),
         "server": {
-          "name": "Keykeeper",
+          "name": "PassBundle",
           // AGPL-3.0 section 13: point network users at this server's source.
-          "url": "https://github.com/PimpinPumpkin/keykeeper-server"
+          "url": "https://github.com/PimpinPumpkin/passbundle-server"
         },
         "settings": {
             "disableUserRegistration": CONFIG.is_signup_disabled(),

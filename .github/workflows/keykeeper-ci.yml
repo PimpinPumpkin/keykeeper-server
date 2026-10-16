@@ -1,4 +1,4 @@
-# Runs Keykeeper's Tier 1 suite against this commit of the server.
+# Runs PassBundle's Tier 1 suite against this commit of the server.
 name: CI
 
 on:
@@ -12,6 +12,6 @@ permissions:
 
 jobs:
   tier1:
-    uses: PimpinPumpkin/keykeeper/.github/workflows/tier1.yml@main
+    uses: PimpinPumpkin/Passbundle/.github/workflows/tier1.yml@main
     with:
       server-ref: ${{ github.sha }}
