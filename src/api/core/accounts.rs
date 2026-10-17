@@ -1398,7 +1398,8 @@ fn unknown_email_kdf(email: &str) -> (i32, i32, Option<i32>, Option<i32>) {
 }
 
 pub async fn prelogin(data: Json<PreloginData>, ip: ClientIp, conn: DbConn) -> JsonResult {
-    crate::ratelimit::check_limit_unauthenticated(&ip.ip)?;
+    // Keykeeper: an address's login allowance, not the shared one (ratelimit.rs).
+    crate::ratelimit::check_limit_prelogin(&ip.ip)?;
 
     let data: PreloginData = data.into_inner();
     // Normalized once, so the lookup and the settings for an unknown email use the same value
