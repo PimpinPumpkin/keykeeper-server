@@ -293,6 +293,9 @@ async fn accept_org_invite(
     user: &User,
     mut member: Membership,
     reset_password_key: Option<String>,
+    // Keykeeper: a join with the install command emails the client's owners
+    // itself (keykeeper_enrollment.rs).
+    notify_inviter: bool,
     conn: &DbConn,
 ) -> EmptyResult {
     if member.status != MembershipStatus::Invited as i32 {
@@ -307,13 +310,19 @@ async fn accept_org_invite(
 
     member.save(conn).await?;
 
-    if CONFIG.mail_enabled() {
+    if CONFIG.mail_enabled() && notify_inviter {
         let Some(org) = Organization::find_by_uuid(&member.org_uuid, conn).await else {
             err!("Organization not found.")
         };
-        // User was invited to an organization, so they must be confirmed manually after acceptance
-        mail::send_invite_accepted(&user.email, &member.invited_by_email.unwrap_or(org.billing_email), &org.name)
-            .await?;
+        let inviter = member.invited_by_email.unwrap_or(org.billing_email);
+        // Keykeeper: where joining is automatic, nobody confirms them, so the
+        // inviter hears that they're in. See DESIGN.md, "Joining".
+        if crate::db::models::effective_joining(&org.uuid, conn).await.0.auto_confirm {
+            mail::send_member_joined(&inviter, &user.email, &org.name, &org.uuid, false, false).await?;
+        } else {
+            // User was invited to an organization, so they must be confirmed manually after acceptance
+            mail::send_invite_accepted(&user.email, &inviter, &org.name).await?;
+        }
     }
 
     Ok(())

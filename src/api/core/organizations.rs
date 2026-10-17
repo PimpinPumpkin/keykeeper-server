@@ -1306,7 +1306,7 @@ async fn accept_invite(
         // In case the user was invited before the mail was saved in db.
         membership.invited_by_email = membership.invited_by_email.or(claims.invited_by_email);
 
-        accept_org_invite(&headers.user, membership, reset_password_key, &conn).await?;
+        accept_org_invite(&headers.user, membership, reset_password_key, true, &conn).await?;
     } else if CONFIG.mail_enabled() {
         // User was invited from /admin, so they are automatically confirmed
         let org_name = CONFIG.invitation_org_name();

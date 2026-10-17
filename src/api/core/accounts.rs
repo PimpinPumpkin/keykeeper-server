@@ -475,7 +475,7 @@ async fn post_set_password(data: Json<SetPasswordData>, headers: Headers, conn: 
             err!("Failed to retrieve the invitation")
         };
 
-        accept_org_invite(&user, membership, None, &conn).await?;
+        accept_org_invite(&user, membership, None, true, &conn).await?;
     }
 
     if CONFIG.mail_enabled() {
