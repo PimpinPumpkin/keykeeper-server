@@ -4,7 +4,8 @@
 // only records which item is the source, which clients get it, each client's
 // copy, and the version of the source each copy was made from, so the console
 // can tell which clients are behind. It never sees a template's name or
-// fields. See DESIGN.md, "MSP templates".
+// fields. A client's own members get its Templates collection, read-only, so
+// they can use the templates. See DESIGN.md, "MSP templates".
 
 use std::collections::HashSet;
 
@@ -17,7 +18,8 @@ use crate::{
     db::{
         DbConn,
         models::{
-            Cipher, CipherId, Collection, CollectionId, MspClient, MspId, MspTemplate, MspTemplateCopy, OrganizationId,
+            Cipher, CipherId, Collection, CollectionId, CollectionUser, Membership, MembershipStatus, MembershipType,
+            MspClient, MspId, MspMembership, MspTemplate, MspTemplateCopy, OrganizationId,
         },
     },
 };
@@ -292,5 +294,29 @@ async fn set_templates_collection(
         err!("Collection not found")
     }
     client.set_templates_collection(collection_id.clone(), &conn).await?;
+    for member in Membership::find_by_org(&org_id, &conn).await {
+        give_templates(&member, &client, &conn).await?;
+    }
     Ok(Json(json!({ "collectionId": collection_id })))
+}
+
+/// Gives one of a client's own members its Templates collection, read-only:
+/// they use the templates, and the MSP keeps them. Owners and admins see every
+/// collection already, the MSP's people reach it through the MSP, and a member
+/// who already has the collection keeps what they have, such as edit access an
+/// admin gave them.
+pub async fn give_templates(member: &Membership, client: &MspClient, conn: &DbConn) -> EmptyResult {
+    let Some(collection) = &client.templates_collection else {
+        return Ok(());
+    };
+    // Members still joining get it when they're confirmed.
+    if member.status != MembershipStatus::Confirmed as i32
+        || member.atype >= MembershipType::Admin
+        || member.access_all
+        || MspMembership::find_by_membership(&member.uuid, conn).await.is_some()
+        || CollectionUser::find_by_collection_and_user(collection, &member.user_uuid, conn).await.is_some()
+    {
+        return Ok(());
+    }
+    CollectionUser::save(&member.user_uuid, collection, true, false, false, conn).await
 }
