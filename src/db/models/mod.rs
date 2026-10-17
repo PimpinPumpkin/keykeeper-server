@@ -10,6 +10,7 @@ mod favorite;
 mod folder;
 mod group;
 // Keykeeper
+mod keykeeper_joining;
 mod keykeeper_msp;
 pub mod keykeeper_roles;
 mod org_policy;
@@ -32,6 +33,9 @@ pub use self::event::{Event, EventType};
 pub use self::favorite::Favorite;
 pub use self::folder::{Folder, FolderCipher, FolderId};
 pub use self::group::{CollectionGroup, Group, GroupId, GroupUser};
+pub use self::keykeeper_joining::{
+    INVITE_HOURS, Joining, JoiningSource, MspJoining, OrgJoining, effective_joining, invite_hours, msp_default,
+};
 pub use self::keykeeper_msp::{
     Msp, MspClient, MspEnrollmentJoin, MspEvent, MspId, MspInvite, MspMembership, MspPolicy, MspRole, MspStaff,
     MspTemplate, MspTemplateCopy, TechnicianAccess, exempt_from_member_policies,

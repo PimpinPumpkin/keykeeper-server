@@ -328,15 +328,17 @@ pub struct InviteJwtClaims {
     pub invited_by_email: Option<String>,
 }
 
+// Keykeeper: how long the invitation lasts is the organization's setting
+// (keykeeper_joining::invite_hours), not only the server's.
 pub fn generate_invite_claims(
     user_id: UserId,
     email: String,
     org_id: OrganizationId,
     member_id: MembershipId,
     invited_by_email: Option<String>,
+    expire_hours: i64,
 ) -> InviteJwtClaims {
     let time_now = Utc::now();
-    let expire_hours = i64::from(CONFIG.invitation_expiration_hours());
     InviteJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + TimeDelta::try_hours(expire_hours).unwrap()).timestamp(),
