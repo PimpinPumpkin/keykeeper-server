@@ -1,0 +1,27 @@
+{{#if approve}}{{email}} is waiting to join {{{org_name}}}{{else}}{{email}} joined {{{org_name}}}{{/if}}
+<!---------------->
+{{> email/email_header }}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none;">
+   <tr style="margin: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none;">
+      <td class="content-block" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; margin: 0; -webkit-font-smoothing: antialiased; padding: 0 0 10px; -webkit-text-size-adjust: none; text-align: center;" valign="top" align="center">
+         {{#if install}}{{email}} {{#if approve}}asked to join{{else}}joined{{/if}} <b>{{org_name}}</b> with your IT provider's install command.{{else}}{{email}} accepted your invitation and joined <b>{{org_name}}</b>.{{/if}}
+         {{#if approve}}They get access once an admin approves them.{{else}}They get access without anyone confirming them.{{/if}}
+      </td>
+   </tr>
+   <tr style="margin: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none;">
+      <td class="content-block" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; margin: 0; -webkit-font-smoothing: antialiased; padding: 0 0 10px; -webkit-text-size-adjust: none; text-align: center;" valign="top" align="center">
+         <a data-testid="member-joined" href="{{{url}}}"
+            clicktracking=off target="_blank" style="color: #ffffff; text-decoration: none; text-align: center; cursor: pointer; display: inline-block; border-radius: 5px; background-color: #3c8dbc; border-color: #3c8dbc; border-style: solid; border-width: 10px 20px; margin: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; line-height: 25px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none;">
+         {{#if approve}}Approve them{{else}}Open the Members page{{/if}}
+         </a>
+      </td>
+   </tr>
+   {{#unless approve}}
+   <tr style="margin: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none;">
+      <td class="content-block last" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 16px; color: #333; line-height: 25px; margin: 0; -webkit-font-smoothing: antialiased; padding: 0; -webkit-text-size-adjust: none; text-align: center;" valign="top" align="center">
+         If you don't know who that is, remove them on the Members page.
+      </td>
+   </tr>
+   {{/unless}}
+</table>
+{{> email/email_footer }}

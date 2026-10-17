@@ -383,6 +383,32 @@ pub async fn send_msp_invite(address: &str, msp_name: &str, role: &str, invited_
     send_email(address, &subject, body_html, body_text).await
 }
 
+/// Keykeeper: someone joined an organization, by accepting an invitation or
+/// with an MSP's install command (`install`). Where joining is automatic
+/// nobody confirms them, so this is how the inviter or the client's owners
+/// hear of it; where an admin approves joiners (`approve`), it says to.
+pub async fn send_member_joined(
+    address: &str,
+    new_user_email: &str,
+    org_name: &str,
+    org_id: &OrganizationId,
+    install: bool,
+    approve: bool,
+) -> EmptyResult {
+    let (subject, body_html, body_text) = get_text(
+        "email/keykeeper_member_joined",
+        json!({
+            "url": format!("{}/#/organizations/{org_id}/members", CONFIG.domain()),
+            "img_src": CONFIG._smtp_img_src(),
+            "email": new_user_email,
+            "org_name": org_name,
+            "install": install,
+            "approve": approve,
+        }),
+    )?;
+    send_email(address, &subject, body_html, body_text).await
+}
+
 pub async fn send_emergency_access_invite(
     address: &str,
     user_id: UserId,

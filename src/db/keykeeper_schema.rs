@@ -144,3 +144,10 @@ table! {
         invite_hours -> Integer,
     }
 }
+
+table! {
+    enrollment_domains (org_uuid) {
+        org_uuid -> Text,
+        domains -> Text,
+    }
+}

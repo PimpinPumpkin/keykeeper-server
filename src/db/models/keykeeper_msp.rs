@@ -21,8 +21,8 @@ use crate::{
     db::{
         DbConn,
         keykeeper_schema::{
-            msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships, msp_policies, msp_staff,
-            msp_staff_clients, msp_template_clients, msp_template_copies, msp_templates, msps,
+            enrollment_domains, msp_clients, msp_enrollment_joins, msp_events, msp_invites, msp_memberships,
+            msp_policies, msp_staff, msp_staff_clients, msp_template_clients, msp_template_copies, msp_templates, msps,
         },
     },
     error::MapResult,
@@ -585,6 +585,100 @@ impl MspMembership {
     }
 }
 
+/// The email domains whose accounts may join a client with its install
+/// command. A client without them lets anyone with the command join.
+#[derive(Identifiable, Queryable, Insertable, AsChangeset)]
+#[diesel(table_name = enrollment_domains)]
+#[diesel(primary_key(org_uuid))]
+pub struct EnrollmentDomains {
+    pub org_uuid: OrganizationId,
+    /// Lowercase, space-separated.
+    pub domains: String,
+}
+
+/// At most this many domains per client.
+pub const MAX_ENROLLMENT_DOMAINS: usize = 20;
+
+/// Domains as people type them ("@Acme.com", " acme.com ") made plain
+/// ("acme.com"), without repeats. An error names the first entry that isn't a
+/// domain.
+pub fn parse_enrollment_domains(entries: &[String]) -> Result<Vec<String>, String> {
+    let mut domains: Vec<String> = Vec::new();
+    for entry in entries {
+        let domain = entry.trim().trim_start_matches('@').trim_end_matches('.').to_lowercase();
+        if domain.is_empty() {
+            continue;
+        }
+        let label_ok = |l: &str| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        };
+        let labels: Vec<&str> = domain.split('.').collect();
+        if domain.len() > 253 || labels.len() < 2 || !labels.iter().all(|l| label_ok(l)) {
+            return Err(format!("\"{}\" isn't an email domain, like example.com", entry.trim()));
+        }
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+    if domains.len() > MAX_ENROLLMENT_DOMAINS {
+        return Err(format!("At most {MAX_ENROLLMENT_DOMAINS} domains"));
+    }
+    Ok(domains)
+}
+
+/// Whether an account's email is at one of these domains: exactly, so
+/// "acme.com" doesn't let in "mail.acme.com" or "notacme.com".
+pub fn email_in_domains(email: &str, domains: &[String]) -> bool {
+    email.rsplit_once('@').is_some_and(|(_, domain)| domains.iter().any(|d| d.eq_ignore_ascii_case(domain)))
+}
+
+impl EnrollmentDomains {
+    pub fn list(&self) -> Vec<String> {
+        self.domains.split_whitespace().map(str::to_owned).collect()
+    }
+
+    pub async fn find_by_org(org_uuid: &OrganizationId, conn: &DbConn) -> Option<Self> {
+        conn.run(move |conn| {
+            enrollment_domains::table.filter(enrollment_domains::org_uuid.eq(org_uuid)).first::<Self>(conn).ok()
+        })
+        .await
+    }
+
+    /// A client's domains, none meaning anyone with the command may join.
+    pub async fn for_org(org_uuid: &OrganizationId, conn: &DbConn) -> Vec<String> {
+        Self::find_by_org(org_uuid, conn).await.map(|d| d.list()).unwrap_or_default()
+    }
+
+    /// Sets a client's domains; none removes the limit.
+    pub async fn set(org_uuid: &OrganizationId, domains: &[String], conn: &DbConn) -> EmptyResult {
+        let org = org_uuid.clone();
+        let row = Self {
+            org_uuid: org_uuid.clone(),
+            domains: domains.join(" "),
+        };
+        let empty = domains.is_empty();
+        conn.run(move |conn| {
+            diesel::delete(enrollment_domains::table.filter(enrollment_domains::org_uuid.eq(org)))
+                .execute(conn)
+                .map(|_| ())
+                .map_res("Error saving the install command's domains")?;
+            if empty {
+                return Ok(());
+            }
+            diesel::insert_into(enrollment_domains::table)
+                .values(&row)
+                .execute(conn)
+                .map(|_| ())
+                .map_res("Error saving the install command's domains")
+        })
+        .await
+    }
+}
+
 impl MspEnrollmentJoin {
     pub fn new(membership_uuid: MembershipId, org_uuid: OrganizationId) -> Self {
         Self {
@@ -1020,5 +1114,45 @@ impl MspTemplateCopy {
                 .unwrap_or_default()
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod enrollment_domain_tests {
+    use super::{email_in_domains, parse_enrollment_domains};
+
+    fn parse(entries: &[&str]) -> Result<Vec<String>, String> {
+        parse_enrollment_domains(&entries.iter().map(|e| (*e).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn domains_are_made_plain_and_kept_once() {
+        assert_eq!(
+            parse(&["@Acme.com", " acme.com ", "", "branch.acme.com."]),
+            Ok(vec!["acme.com".to_owned(), "branch.acme.com".to_owned()])
+        );
+        assert_eq!(parse(&[]), Ok(vec![]));
+    }
+
+    #[test]
+    fn anything_but_a_domain_is_refused_by_name() {
+        assert_eq!(parse(&["acme.com", "acme"]), Err("\"acme\" isn't an email domain, like example.com".to_owned()));
+        for bad in ["dana@acme.com", "acme..com", "-acme.com", "acme-.com", "ac me.com", "acme.com/x", "*.acme.com"] {
+            assert!(parse(&[bad]).is_err(), "{bad}");
+        }
+        let many: Vec<String> = (0..21).map(|i| format!("d{i}.com")).collect();
+        assert_eq!(parse_enrollment_domains(&many), Err("At most 20 domains".to_owned()));
+    }
+
+    #[test]
+    fn an_email_matches_its_exact_domain_only() {
+        let domains = vec!["acme.com".to_owned()];
+        assert!(email_in_domains("dana@acme.com", &domains));
+        assert!(email_in_domains("Dana@ACME.com", &domains));
+        assert!(!email_in_domains("dana@mail.acme.com", &domains));
+        assert!(!email_in_domains("dana@notacme.com", &domains));
+        assert!(!email_in_domains("acme.com", &domains));
+        // The domain is after the last @.
+        assert!(!email_in_domains("acme.com@evil.test", &domains));
     }
 }
