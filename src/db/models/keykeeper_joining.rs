@@ -19,7 +19,7 @@ use crate::{
     error::MapResult,
 };
 
-use super::{Msp, MspClient, MspId, OrganizationId};
+use super::{MspClient, MspId, OrganizationId};
 
 /// Invitations last between an hour and 30 days.
 pub const INVITE_HOURS: std::ops::RangeInclusive<i32> = 1..=720;
@@ -139,7 +139,7 @@ pub enum JoiningSource {
     /// Its own, set in its admin console or by an MSP admin for this client.
     Own,
     /// Its MSP's default.
-    Msp(Msp),
+    Msp,
     /// The server's: the organization isn't an MSP's client.
     Server,
 }
@@ -158,10 +158,8 @@ pub async fn effective_joining(org_uuid: &OrganizationId, conn: &DbConn) -> (Joi
         };
         return (joining, JoiningSource::Own);
     }
-    if let Some(client) = MspClient::find_by_org(org_uuid, conn).await
-        && let Some(msp) = Msp::find_by_uuid(&client.msp_uuid, conn).await
-    {
-        return (msp_default(&msp.uuid, conn).await, JoiningSource::Msp(msp));
+    if let Some(client) = MspClient::find_by_org(org_uuid, conn).await {
+        return (msp_default(&client.msp_uuid, conn).await, JoiningSource::Msp);
     }
     (Joining::server_default(), JoiningSource::Server)
 }

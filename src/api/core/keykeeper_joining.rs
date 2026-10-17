@@ -17,7 +17,7 @@ use crate::{
     db::{
         DbConn,
         models::{
-            INVITE_HOURS, Joining, JoiningSource, Membership, MembershipStatus, MembershipType, MspClient, MspId,
+            INVITE_HOURS, Joining, JoiningSource, Membership, MembershipStatus, MembershipType, Msp, MspClient, MspId,
             MspJoining, OrgJoining, Organization, OrganizationId, User, effective_joining, msp_default,
         },
     },
@@ -72,18 +72,20 @@ async fn require_owner_or_admin(org_id: &OrganizationId, headers: &Headers, conn
 async fn org_view(org_id: &OrganizationId, conn: &DbConn) -> Value {
     let (joining, source) = effective_joining(org_id, conn).await;
     let mut view = joining_json(joining);
-    match source {
-        JoiningSource::Own => view["source"] = json!("own"),
-        JoiningSource::Msp(msp) => {
-            view["source"] = json!("msp");
-            view["mspName"] = json!(msp.name);
-            view["mspDefault"] = joining_json(msp_default(&msp.uuid, conn).await);
-        }
-        JoiningSource::Server => view["source"] = json!("server"),
-    }
-    // What "back to the default" would give, for the admin console.
-    if let Some(client) = MspClient::find_by_org(org_id, conn).await {
-        view["default"] = joining_json(msp_default(&client.msp_uuid, conn).await);
+    view["source"] = json!(match source {
+        JoiningSource::Own => "own",
+        JoiningSource::Msp => "msp",
+        JoiningSource::Server => "server",
+    });
+    // For an MSP's client, the MSP and its default, whether the client
+    // follows it or has its own: the admin console offers to go back to it.
+    let msp = match MspClient::find_by_org(org_id, conn).await {
+        Some(client) => Msp::find_by_uuid(&client.msp_uuid, conn).await,
+        None => None,
+    };
+    if let Some(msp) = msp {
+        view["mspName"] = json!(msp.name);
+        view["default"] = joining_json(msp_default(&msp.uuid, conn).await);
     } else {
         view["default"] = joining_json(Joining::server_default());
     }
