@@ -777,15 +777,22 @@ make_config! {
         /// Allowed connect-src (Know the risks!) |> Allows other domains to URLs which can be loaded using script interfaces like the Forwarded email alias feature
         allowed_connect_src:      String, true, def,    String::new();
 
-        /// Seconds between login requests |> Number of seconds, on average, between login and 2FA requests from the same IP address before rate limiting kicks in
-        login_ratelimit_seconds:       u64, false, def, 60;
+        // Keykeeper: an address's limit is generous, so an office behind one
+        // address can log in together on rollout day, and each account has its
+        // own strict one. See DESIGN.md, "Login limits".
+        /// Seconds between login requests |> Number of seconds, on average, between login and 2FA requests from the same IP address before rate limiting kicks in. Each account also has its own limit, below
+        login_ratelimit_seconds:       u64, false, def, 6;
         /// Max burst size for login requests |> Allow a burst of requests of up to this size, while maintaining the average indicated by `login_ratelimit_seconds`. Note that this applies to both the login and the 2FA, so it's recommended to allow a burst size of at least 2
-        login_ratelimit_max_burst:     u32, false, def, 10;
+        login_ratelimit_max_burst:     u32, false, def, 100;
+        /// Seconds between login requests for one account |> Number of seconds, on average, between login and 2FA requests for the same email address, from anywhere, before rate limiting kicks in
+        login_ratelimit_account_seconds:   u64, false, def, 60;
+        /// Max burst size for login requests for one account |> Allow a burst of requests for one email address of up to this size, while maintaining the average indicated by `login_ratelimit_account_seconds`
+        login_ratelimit_account_max_burst: u32, false, def, 10;
 
         /// Seconds between unauthenticated requests |> Number of seconds, on average, between requests from the same IP address to any of the rate limited unauthenticated endpoints
         unauthenticated_ratelimit_seconds:   u64, false, def, 60;
-        /// Max burst size for unauthenticated requests |> Allow a burst of requests of up to this size, while maintaining the average indicated by `unauthenticated_ratelimit_seconds`. This is shared between several endpoints, so it needs to be more lenient than the login one
-        unauthenticated_ratelimit_max_burst: u32, false, def, 50;
+        /// Max burst size for unauthenticated requests |> Allow a burst of requests of up to this size, while maintaining the average indicated by `unauthenticated_ratelimit_seconds`. This is shared between several endpoints, so it needs to be more lenient than the login one. Keykeeper: enough for an office of 50 to sign up together (pre-login counts against the login limit instead)
+        unauthenticated_ratelimit_max_burst: u32, false, def, 150;
 
         /// Seconds between admin login requests |> Number of seconds, on average, between admin requests from the same IP address before rate limiting kicks in
         admin_ratelimit_seconds:       u64, false, def, 300;
