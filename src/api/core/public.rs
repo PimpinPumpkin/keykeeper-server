@@ -15,7 +15,7 @@ use crate::{
         DbConn,
         models::{
             Group, GroupUser, Invitation, Membership, MembershipStatus, MembershipType, OrgPolicy, Organization,
-            OrganizationApiKey, OrganizationId, User,
+            OrganizationApiKey, OrganizationId, User, invite_hours,
         },
     },
     mail,
@@ -119,9 +119,12 @@ async fn ldap_import(data: Json<OrgImportData>, token: PublicToken, conn: DbConn
 
             new_member.save(&conn).await?;
 
+            // Keykeeper: the organization's invitation lifetime.
+            let hours = invite_hours(&org_id, &conn).await;
             if CONFIG.mail_enabled()
                 && let Err(e) =
-                    mail::send_invite(&user, org_id.clone(), new_member.uuid.clone(), &org_name, Some(org_email)).await
+                    mail::send_invite(&user, org_id.clone(), new_member.uuid.clone(), &org_name, Some(org_email), hours)
+                        .await
             {
                 // Upon error delete the user, invite and org member records when needed
                 if user_created {

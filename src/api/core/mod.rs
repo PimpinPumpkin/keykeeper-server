@@ -7,6 +7,7 @@ mod events;
 mod folders;
 // Keykeeper
 mod keykeeper_enrollment;
+mod keykeeper_joining;
 mod keykeeper_msp;
 mod keykeeper_msp_policies;
 mod keykeeper_msp_templates;
@@ -49,6 +50,7 @@ pub fn routes() -> Vec<Route> {
     routes.append(&mut events::routes());
     routes.append(&mut folders::routes());
     routes.append(&mut organizations::routes());
+    routes.append(&mut keykeeper_joining::routes());
     routes.append(&mut keykeeper_msp::routes());
     routes.append(&mut keykeeper_msp_policies::routes());
     routes.append(&mut keykeeper_msp_templates::routes());

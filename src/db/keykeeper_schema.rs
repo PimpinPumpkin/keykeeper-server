@@ -128,3 +128,19 @@ table! {
         source_revision -> Text,
     }
 }
+
+table! {
+    org_joining (org_uuid) {
+        org_uuid -> Text,
+        auto_confirm -> Bool,
+        invite_hours -> Integer,
+    }
+}
+
+table! {
+    msp_joining (msp_uuid) {
+        msp_uuid -> Text,
+        auto_confirm -> Bool,
+        invite_hours -> Integer,
+    }
+}

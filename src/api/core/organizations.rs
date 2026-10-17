@@ -18,7 +18,7 @@ use crate::{
             Cipher, CipherId, Collection, CollectionCipher, CollectionGroup, CollectionId, CollectionUser, Device,
             EventType, Group, GroupId, GroupUser, Invitation, Membership, MembershipId, MembershipStatus,
             MembershipType, OrgPolicy, OrgPolicyType, Organization, OrganizationApiKey, OrganizationId, TwoFactor,
-            TwoFactorType, User, UserId, exempt_from_member_policies,
+            TwoFactorType, User, UserId, exempt_from_member_policies, invite_hours,
         },
     },
     mail,
@@ -1101,6 +1101,8 @@ async fn send_invite(
                 new_member.uuid.clone(),
                 &org_name,
                 Some(headers.user.email.clone()),
+                // Keykeeper: the organization's invitation lifetime.
+                invite_hours(&org_id, &conn).await,
             )
             .await
             {
@@ -1235,7 +1237,10 @@ async fn reinvite_member_impl(
     };
 
     if CONFIG.mail_enabled() {
-        mail::send_invite(&user, org_id.clone(), member.uuid, &org_name, Some(invited_by_email.to_owned())).await?;
+        // Keykeeper: the organization's invitation lifetime.
+        let hours = invite_hours(org_id, conn).await;
+        mail::send_invite(&user, org_id.clone(), member.uuid, &org_name, Some(invited_by_email.to_owned()), hours)
+            .await?;
     } else if user.password_hash.is_empty() {
         let invitation = Invitation::new(&user.email);
         invitation.save(conn).await?;

@@ -27,6 +27,7 @@ use crate::{
         models::{
             Collection, Membership, MembershipId, MembershipStatus, MembershipType, Msp, MspClient, MspEvent, MspId,
             MspInvite, MspMembership, MspRole, MspStaff, Organization, OrganizationId, TechnicianAccess, User, UserId,
+            effective_joining,
             keykeeper_roles::{self, CustomPermissions, Permission},
         },
     },
@@ -909,6 +910,9 @@ async fn pending_confirmations(msp_id: MspId, headers: Headers, conn: DbConn) ->
         if !is_owner && caller.atype != MembershipType::Admin as i32 {
             continue;
         }
+        // Background work skips clients that want an admin to approve joiners;
+        // the console's Confirm button still offers them.
+        let auto_confirm = effective_joining(&client.org_uuid, &conn).await.0.auto_confirm;
         for member in Membership::find_by_org(&client.org_uuid, &conn).await {
             // Upstream lets only owners confirm admins and owners, so a
             // technician (an admin) gets just the regular members.
@@ -931,6 +935,7 @@ async fn pending_confirmations(msp_id: MspId, headers: Headers, conn: DbConn) ->
                 "name": user.name,
                 "publicKey": public_key,
                 "fromMsp": ours.contains(&member.uuid),
+                "autoConfirm": auto_confirm,
             }));
         }
     }

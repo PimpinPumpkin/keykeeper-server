@@ -279,12 +279,15 @@ pub async fn send_single_org_removed_from_org(address: &str, org_name: &str) -> 
     send_email(address, &subject, body_html, body_text).await
 }
 
+// Keykeeper: expire_hours is the organization's invitation lifetime, which the
+// email states. See DESIGN.md, "Joining".
 pub async fn send_invite(
     user: &User,
     org_id: OrganizationId,
     member_id: MembershipId,
     org_name: &str,
     invited_by_email: Option<String>,
+    expire_hours: i64,
 ) -> EmptyResult {
     let claims = generate_invite_claims(
         user.uuid.clone(),
@@ -292,6 +295,7 @@ pub async fn send_invite(
         org_id.clone(),
         member_id.clone(),
         invited_by_email,
+        expire_hours,
     );
     let invite_token = encode_jwt(&claims);
     let mut query = url::Url::parse("https://query.builder").unwrap();
@@ -332,10 +336,35 @@ pub async fn send_invite(
             "url": format!("{}/#/accept-organization/?{query_string}", CONFIG.domain()),
             "img_src": CONFIG._smtp_img_src(),
             "org_name": org_name,
+            "expires_in": lifetime_words(expire_hours),
         }),
     )?;
 
     send_email(&user.email, &subject, body_html, body_text).await
+}
+
+/// Keykeeper: an invitation's lifetime in words: "2 hours", "1 day", "5 days".
+pub fn lifetime_words(hours: i64) -> String {
+    if hours % 24 == 0 {
+        let days = hours / 24;
+        format!(
+            "{days} day{}",
+            if days == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    } else {
+        format!(
+            "{hours} hour{}",
+            if hours == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    }
 }
 
 /// Keykeeper: an invitation to join an MSP's staff, for someone who may not
