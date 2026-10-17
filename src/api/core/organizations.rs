@@ -1456,6 +1456,14 @@ async fn confirm_invite_impl(
 
     let save_result = member_to_confirm.save(conn).await;
 
+    // Keykeeper: a client's own members get its Templates collection,
+    // read-only, once they're in. Every way in ends here.
+    if save_result.is_ok()
+        && let Some(client) = crate::db::models::MspClient::find_by_org(org_id, conn).await
+    {
+        super::keykeeper_msp_templates::give_templates(&member_to_confirm, &client, conn).await?;
+    }
+
     if let Some(user) = User::find_by_uuid(&member_to_confirm.user_uuid, conn).await {
         nt.send_user_update(UpdateType::SyncOrgKeys, &user, headers.device.push_uuid.as_ref(), conn).await;
     }
